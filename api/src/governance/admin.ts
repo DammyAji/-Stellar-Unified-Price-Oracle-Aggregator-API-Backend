@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { apiKeyManager, TIER_RATE_LIMITS, KeyTier } from './api-key-manager';
+import { apiKeyManager, TIER_RATE_LIMITS, KeyTier, KeyStoreWriteError, type GeneratedApiKey } from './api-key-manager';
+import { keyMutation } from './key-mutation';
 import { corsManager } from './cors-manager';
 import { recordComplianceAudit } from './compliance';
 import { adminAuthMiddleware } from './auth';
@@ -46,7 +47,7 @@ function guardTargetKey(req: Request, res: Response): ReturnType<typeof apiKeyMa
 
 // ── API Key Management ────────────────────────────────────────────────────────
 
-router.post('/keys', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
+router.post('/keys', requireRole('operator', 'keys:write'), keyMutation(async (req: Request, res: Response) => {
   const { rateLimitPerMin, description, tier = 'free', role = 'viewer' } = req.body;
 
   const validTiers: KeyTier[] = ['free', 'pro', 'enterprise', 'admin'];
@@ -83,7 +84,9 @@ router.post('/keys', requireRole('operator', 'keys:write'), (req: Request, res: 
     : TIER_RATE_LIMITS[tier as KeyTier];
 
   try {
-    const newKey = apiKeyManager.generateKey(limit, description, tier as KeyTier, role as Role);
+    const newKey = await apiKeyManager.transact(() =>
+      apiKeyManager.generateKey(limit, description, tier as KeyTier, role as Role),
+    );
     logger.info(`Admin ${req.apiKey?.substring(0, 8)}... generated API key tier=${tier} role=${role}`);
 
     // Publish ApiKeyCreatedEvent
@@ -110,13 +113,14 @@ router.post('/keys', requireRole('operator', 'keys:write'), (req: Request, res: 
       },
     });
   } catch (err) {
+    if (err instanceof KeyStoreWriteError) throw err;
     logger.error('Failed to generate API key', err);
     res.status(500).json({
       success: false,
       error: { code: 'KEY_GENERATION_FAILED', message: 'Failed to generate API key' },
     });
   }
-});
+}));
 
 router.get('/keys', requireRole('viewer', 'keys:read'), (_req: Request, res: Response) => {
   const keys = apiKeyManager.getAllKeys();
@@ -134,11 +138,11 @@ router.get('/keys/:keyHash', requireRole('viewer', 'keys:read'), (req: Request, 
   res.json({ success: true, data: keyInfo });
 });
 
-router.post('/keys/:keyHash/rotate', requireRole('operator', 'keys:rotate'), (req: Request, res: Response) => {
+router.post('/keys/:keyHash/rotate', requireRole('operator', 'keys:rotate'), keyMutation(async (req: Request, res: Response) => {
   const existing = guardTargetKey(req, res);
   if (!existing) return;
 
-  const rotated = apiKeyManager.rotateKey(req.params.keyHash);
+  const rotated: GeneratedApiKey | null = await apiKeyManager.transact(() => apiKeyManager.rotateKey(req.params.keyHash));
   if (!rotated) {
     return res.status(500).json({
       success: false,
@@ -158,9 +162,9 @@ router.post('/keys/:keyHash/rotate', requireRole('operator', 'keys:rotate'), (re
       message: 'Old key is now invalid. Store new key securely.',
     },
   });
-});
+}));
 
-router.put('/keys/:keyHash/tier', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
+router.put('/keys/:keyHash/tier', requireRole('operator', 'keys:write'), keyMutation(async (req: Request, res: Response) => {
   const { tier } = req.body;
   const validTiers: KeyTier[] = ['free', 'pro', 'enterprise', 'admin'];
 
@@ -174,14 +178,14 @@ router.put('/keys/:keyHash/tier', requireRole('operator', 'keys:write'), (req: R
   const existing = guardTargetKey(req, res);
   if (!existing) return;
 
-  apiKeyManager.updateTier(req.params.keyHash, tier as KeyTier);
+  await apiKeyManager.transact(() => apiKeyManager.updateTier(req.params.keyHash, tier as KeyTier));
   res.json({
     success: true,
     data: { keyHash: req.params.keyHash, tier, rateLimitPerMin: TIER_RATE_LIMITS[tier as KeyTier] },
   });
-});
+}));
 
-router.put('/keys/:keyHash/rate-limit', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
+router.put('/keys/:keyHash/rate-limit', requireRole('operator', 'keys:write'), keyMutation(async (req: Request, res: Response) => {
   const { rateLimitPerMin } = req.body;
 
   if (typeof rateLimitPerMin !== 'number' || rateLimitPerMin < 1) {
@@ -194,15 +198,15 @@ router.put('/keys/:keyHash/rate-limit', requireRole('operator', 'keys:write'), (
   const existing = guardTargetKey(req, res);
   if (!existing) return;
 
-  apiKeyManager.updateRateLimit(req.params.keyHash, rateLimitPerMin);
+  await apiKeyManager.transact(() => apiKeyManager.updateRateLimit(req.params.keyHash, rateLimitPerMin));
   res.json({ success: true, data: { keyHash: req.params.keyHash, rateLimitPerMin } });
-});
+}));
 
-router.post('/keys/:keyHash/revoke', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
+router.post('/keys/:keyHash/revoke', requireRole('operator', 'keys:write'), keyMutation(async (req: Request, res: Response) => {
   const existing = guardTargetKey(req, res);
   if (!existing) return;
 
-  apiKeyManager.revokeKey(req.params.keyHash);
+  await apiKeyManager.transact(() => apiKeyManager.revokeKey(req.params.keyHash));
   logger.info(`Admin ${req.apiKey?.substring(0, 8)}... revoked key ${req.params.keyHash}`);
 
   // Publish ApiKeyRevokedEvent
@@ -215,18 +219,18 @@ router.post('/keys/:keyHash/revoke', requireRole('operator', 'keys:write'), (req
   });
 
   res.json({ success: true, data: { keyHash: req.params.keyHash, action: 'revoked' } });
-});
+}));
 
-router.post('/keys/:keyHash/reactivate', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
+router.post('/keys/:keyHash/reactivate', requireRole('operator', 'keys:write'), keyMutation(async (req: Request, res: Response) => {
   const existing = guardTargetKey(req, res);
   if (!existing) return;
 
-  apiKeyManager.reactivateKey(req.params.keyHash);
+  await apiKeyManager.transact(() => apiKeyManager.reactivateKey(req.params.keyHash));
   logger.info(`Admin ${req.apiKey?.substring(0, 8)}... reactivated key ${req.params.keyHash}`);
   res.json({ success: true, data: { keyHash: req.params.keyHash, action: 'reactivated' } });
-});
+}));
 
-router.delete('/keys/:keyHash', requireRole('admin', 'keys:delete'), (req: Request, res: Response) => {
+router.delete('/keys/:keyHash', requireRole('admin', 'keys:delete'), keyMutation(async (req: Request, res: Response) => {
   const existing = apiKeyManager.findByHash(req.params.keyHash);
   if (!existing) {
     return res.status(404).json({
@@ -235,10 +239,10 @@ router.delete('/keys/:keyHash', requireRole('admin', 'keys:delete'), (req: Reque
     });
   }
 
-  apiKeyManager.deleteKey(req.params.keyHash);
+  await apiKeyManager.transact(() => apiKeyManager.deleteKey(req.params.keyHash));
   logger.info(`Admin ${req.apiKey?.substring(0, 8)}... deleted key ${req.params.keyHash}`);
   res.json({ success: true, data: { keyHash: req.params.keyHash, action: 'deleted' } });
-});
+}));
 
 // ── CORS Management ───────────────────────────────────────────────────────────
 
