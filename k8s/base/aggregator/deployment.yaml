@@ -17,10 +17,25 @@ spec:
         app: aggregator
         version: stable
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: aggregator
           image: oracle-aggregator:placeholder
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - name: http-metrics
               containerPort: 4000
@@ -36,6 +51,13 @@ spec:
           env:
             - name: PORT
               value: "4000"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: data
+              mountPath: /app/data
+            - name: logs
+              mountPath: /app/logs
           readinessProbe:
             httpGet:
               path: /health
@@ -55,3 +77,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}

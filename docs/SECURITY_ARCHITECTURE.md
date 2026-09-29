@@ -214,6 +214,21 @@ characters.
 long-lived-key compromise, DB/dump leaks (see §2), and unrotated credentials
 after an incident.
 
+## 7. Kubernetes workload hardening
+
+**Where:** `k8s/base/api/deployment-stable.yaml`, `k8s/base/api/deployment-canary.yaml`, `k8s/base/aggregator/deployment.yaml`, `k8s/blue-green/*.yaml`, and `k8s/base/namespace.yaml` plus the overlay namespace manifests.
+
+The repository applies Pod Security Admission in the `restricted` profile to the namespaces that run the API, aggregator, and support services. The decision is compatible with the application runtime because the Node-based images are intentionally run as a fixed non-root UID/GID (`1000:1000`), and the writable paths are mounted explicitly instead of leaving the root filesystem writable.
+
+- **Non-root execution:** `runAsNonRoot: true`, `runAsUser: 1000`, `runAsGroup: 1000`, `fsGroup: 1000`.
+- **Read-only root filesystem:** `readOnlyRootFilesystem: true` on each container.
+- **Privilege isolation:** `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, `seccompProfile.type: RuntimeDefault`.
+- **Writable paths:** `/tmp`, `/app/data`, and `/app/logs` are backed by `emptyDir` volumes. This matches the actual application write paths: the API persists CORS origins to `/tmp/cors-origins.json` by default (`api/src/governance/cors-manager.ts`), writes audit/compliance logs under `logs/` (`api/src/governance/audit-logger.ts`, `api/src/governance/compliance.ts`, `api/src/observability/logger.ts`), and the aggregator keeps price history files under `./data` via `services/aggregator/src/persistence/history.ts`.
+- **Why the mounts exist:** the API relies on a writable temporary CORS file and a file-backed log directory; the aggregator stores JSON price history in `data/` and writes runtime logs to `logs/`. The root filesystem remains read-only while these paths stay writable.
+- **Validation:** `scripts/validate-k8s.sh` parses the built overlays and fails if the API/aggregator Deployment manifests omit the required security fields. The CI workflow in `.github/workflows/k8s-validation.yml` runs that script on every change touching `k8s/**`.
+
+This is a static validation posture: it confirms the manifests satisfy the repository's restricted security baseline, but it does not assert a live cluster's admission or node-level enforcement. Actual cluster validation would require a reachable Kubernetes API server and policy-controller enforcement.
+
 ## Consolidated threat model & mitigations
 
 | Threat | Affected control | Mitigation (implemented) | Verification |
