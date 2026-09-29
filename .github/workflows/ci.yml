@@ -148,6 +148,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check aggregator port consistency (issue #590)
+        run: node scripts/check-port-consistency.mjs
+
       - name: Install kustomize
         run: |
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash

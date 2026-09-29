@@ -21,7 +21,7 @@ export const config = {
   },
   port: parseInt(process.env.API_PORT || '3000', 10),
   wsPort: parseInt(process.env.WS_PORT || '3001', 10),
-  aggregatorUrl: process.env.AGGREGATOR_URL || 'http://localhost:4000',
+  aggregatorUrl: process.env.AGGREGATOR_URL || 'http://localhost:4002',
   stellarRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
   contractId: process.env.CONTRACT_ID || '',
   networkPassphrase: process.env.NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',

@@ -12,8 +12,10 @@ This file maps Prometheus alert names and observed failure modes to their canoni
 - `IstioHighRequestLatency` — Runbook: [istio-high-request-latency.md](istio-high-request-latency.md)
 - `IstioHighErrorRate` — Runbook: [high-error-rate.md](high-error-rate.md)
 - `ApiCanaryImbalance` — Runbook: [api-canary-imbalance.md](api-canary-imbalance.md)
+- `AggregatorMetricsTargetDown` — Runbook: [aggregator-metrics-missing.md](aggregator-metrics-missing.md)
+- `AggregatorMetricsAbsent` — Runbook: [aggregator-metrics-missing.md](aggregator-metrics-missing.md)
 
-Files containing rules: `k8s/base/prometheus-rule.yaml`, `k8s/istio/observability/prometheus.yaml`, `k8s/cost-optimization/prometheus-rule.yaml`.
+Files containing rules: `k8s/base/prometheus-rule.yaml`, `k8s/base/aggregator/service-monitor.yaml` (scrape target), `k8s/istio/observability/prometheus.yaml`, `k8s/cost-optimization/prometheus-rule.yaml`.
 
 ## Alerts referenced by runbooks or tests but not defined in repository rules
 

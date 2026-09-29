@@ -263,7 +263,7 @@ All services must export these base metrics via Prometheus:
 ```bash
 # From each service, curl /metrics endpoint and grep for expected metrics
 curl http://localhost:3000/metrics | head -50  # API
-curl http://localhost:4000/metrics | head -50  # Aggregator
+curl http://localhost:4002/metrics | head -50  # Aggregator
 ```
 
 ---
