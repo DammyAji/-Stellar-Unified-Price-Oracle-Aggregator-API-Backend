@@ -43,6 +43,18 @@ Istio mesh in `k8s/istio/`, Terraform in `infrastructure/terraform/`.
    contract suite (`cd contracts/price-oracle && cargo test`) before any
    deploy.
 
+## 1.5 Topology-aware scheduling for stateless workloads
+
+The stateless API and aggregator Deployments intentionally spread replicas across node and zone topology while keeping the scheduler permissive enough to support HPA-driven scale-up. The base manifests use:
+
+- `topologySpreadConstraints` on `kubernetes.io/hostname` with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`.
+- `topologySpreadConstraints` on `topology.kubernetes.io/zone` with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`.
+- preferred pod anti-affinity for replicas of the same service (`app: api` and `app: aggregator`) on the same host.
+
+This is intentionally not `DoNotSchedule`: in single-node or partially degraded environments, the scheduler should still place additional replicas when a domain is unavailable, rather than permanently blocking HPA scale-out. The production overlays (`prod`, `prod-us-east-1`, `prod-eu-west-1`) are treated as multi-zone-capable and therefore include both hostname and zone spreads; the single-node development environment keeps the same policy but the zone spread is a best-effort placement hint rather than a hard blocker.
+
+Redis (`k8s/base/redis/`) and TimescaleDB (`k8s/base/timescaledb/`) are stateful services with their own placement assumptions; they are not covered by the stateless API/aggregator policy. The database stateful sets already use anti-affinity and zone-aware spread separately, so the stateless workload changes intentionally avoid interfering with their storage-backed topology requirements.
+
 ## 2. Database provisioning
 
 - **Self-hosted (compose):** `docker-compose.yml` runs
