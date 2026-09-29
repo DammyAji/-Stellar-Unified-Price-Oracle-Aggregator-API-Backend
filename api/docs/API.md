@@ -205,6 +205,27 @@ and the `/api/v1/webhooks` CRUD + `/api/v1/webhooks/:id/deliveries` routes are
 documented with full request/response schemas in the Swagger UI — see
 `api/openapi.json` for the authoritative machine-readable spec.
 
+#### Delivery queue & circuit breaker
+
+Webhook deliveries run through an **in-process queue** (registrations are
+in-memory, so no external broker is required): jobs are delivered in FIFO order
+per destination with at most `WEBHOOK_MAX_CONCURRENT` (default 5) deliveries
+in flight globally, and at most one per destination. Retries are scheduled by
+the queue with exponential backoff (`WEBHOOK_BASE_DELAY_MS` …
+`WEBHOOK_MAX_RETRIES`), and each destination is capped at
+`WEBHOOK_MAX_PENDING` queued jobs (oldest dropped first). Price broadcasts only
+enqueue — webhook latency never delays WebSocket subscribers.
+
+After `WEBHOOK_CIRCUIT_THRESHOLD` (default 3) consecutive deliveries exhaust
+their retries, the destination's circuit opens: no further attempts until
+`WEBHOOK_CIRCUIT_COOLDOWN_MS` (default 60 s) elapses, when one queued job is
+probed. The circuit state is surfaced on the webhook resource as `circuit`
+(`closed` | `open` | `half-open`) plus `nextProbeAt`. Queue depth, in-flight
+concurrency, delivery outcomes, dropped jobs, and open circuits are exported on
+`GET /metrics` as `webhook_queue_depth`, `webhook_deliveries_in_flight`,
+`webhook_deliveries_total`, `webhook_jobs_dropped_total`, and
+`webhook_circuits_open`.
+
 ## WebSocket Protocol
 
 Connect to `ws://localhost:3001` with an API key header (same as REST). On a

@@ -150,5 +150,9 @@ export const config = {
     maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || '5', 10),
     timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS || '10000', 10),
     minIntervalMs: parseInt(process.env.WEBHOOK_MIN_INTERVAL_MS || '60000', 10),
+    maxConcurrent: parseInt(process.env.WEBHOOK_MAX_CONCURRENT || '5', 10),
+    maxPendingPerDestination: parseInt(process.env.WEBHOOK_MAX_PENDING || '100', 10),
+    circuitFailureThreshold: parseInt(process.env.WEBHOOK_CIRCUIT_THRESHOLD || '3', 10),
+    circuitCooldownMs: parseInt(process.env.WEBHOOK_CIRCUIT_COOLDOWN_MS || '60000', 10),
   },
 };

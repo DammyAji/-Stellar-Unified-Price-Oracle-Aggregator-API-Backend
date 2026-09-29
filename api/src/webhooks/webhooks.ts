@@ -41,6 +41,8 @@ router.post('/', (req: Request, res: Response) => {
       verificationKey: webhook.verificationKey,
       status: webhook.status,
       failureCount: webhook.failureCount,
+      circuit: webhook.circuit,
+      nextProbeAt: webhook.nextProbeAt,
     },
   });
 });

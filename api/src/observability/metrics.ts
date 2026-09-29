@@ -221,6 +221,38 @@ export const rateLimitRedisLatency = new client.Histogram({
 });
 register.registerMetric(rateLimitRedisLatency);
 
+export const webhookQueueDepth = new client.Gauge({
+  name: 'webhook_queue_depth',
+  help: 'Pending webhook delivery jobs across all destinations',
+});
+register.registerMetric(webhookQueueDepth);
+
+export const webhookDeliveriesInFlight = new client.Gauge({
+  name: 'webhook_deliveries_in_flight',
+  help: 'Webhook deliveries currently executing (bounded by WEBHOOK_MAX_CONCURRENT)',
+});
+register.registerMetric(webhookDeliveriesInFlight);
+
+export const webhookDeliveriesTotal = new client.Counter({
+  name: 'webhook_deliveries_total',
+  help: 'Webhook job outcomes (success, failed, retry_scheduled)',
+  labelNames: ['result'],
+});
+register.registerMetric(webhookDeliveriesTotal);
+
+export const webhookJobsDroppedTotal = new client.Counter({
+  name: 'webhook_jobs_dropped_total',
+  help: 'Webhook jobs dropped before delivery, by reason',
+  labelNames: ['reason'],
+});
+register.registerMetric(webhookJobsDroppedTotal);
+
+export const webhookCircuitsOpen = new client.Gauge({
+  name: 'webhook_circuits_open',
+  help: 'Destinations currently parked by an open circuit breaker',
+});
+register.registerMetric(webhookCircuitsOpen);
+
 export const pipelineStageLatencyMs = new client.Histogram({
   name: 'pipeline_stage_latency_ms',
   help: 'Latency budget for each stage of the price pipeline in milliseconds',
