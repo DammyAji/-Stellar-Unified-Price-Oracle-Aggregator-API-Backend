@@ -11,7 +11,7 @@ import { DataConsistencyChecker } from '../infrastructure/data-consistency';
 import { BackupService } from '../infrastructure/backup';
 import { DrStatusService } from '../services/dr-status';
 import { config } from '../infrastructure/config';
-import type { Role } from './rbac';
+import { requireRole, roleLevel, denyAuthorization, type Role } from './rbac';
 import { eventBus } from '../domain-events';
 import { sourceCircuitBreakers } from '../infrastructure/source-circuit-breakers';
 
@@ -20,9 +20,32 @@ const ADMIN_KEY_PREFIX = process.env.ADMIN_KEY_PREFIX || 'admin_';
 
 router.use(adminAuthMiddleware(ADMIN_KEY_PREFIX));
 
+function guardTargetKey(req: Request, res: Response): ReturnType<typeof apiKeyManager.findByHash> {
+  const existing = apiKeyManager.findByHash(req.params.keyHash);
+  if (!existing) {
+    res.status(404).json({
+      success: false,
+      error: { code: 'KEY_NOT_FOUND', message: 'API key not found' },
+    });
+    return null;
+  }
+  const requester = req.userRole ?? 'viewer';
+  if (roleLevel(existing.role) > roleLevel(requester)) {
+    denyAuthorization(
+      req,
+      res,
+      'role_escalation',
+      `A '${requester}' key cannot modify a '${existing.role}' key`,
+      { requiredRole: existing.role },
+    );
+    return null;
+  }
+  return existing;
+}
+
 // ── API Key Management ────────────────────────────────────────────────────────
 
-router.post('/keys', (req: Request, res: Response) => {
+router.post('/keys', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
   const { rateLimitPerMin, description, tier = 'free', role = 'viewer' } = req.body;
 
   const validTiers: KeyTier[] = ['free', 'pro', 'enterprise', 'admin'];
@@ -40,6 +63,18 @@ router.post('/keys', (req: Request, res: Response) => {
       success: false,
       error: { code: 'INVALID_ROLE', message: `role must be one of: ${validRoles.join(', ')}` },
     });
+  }
+
+  const requesterRole = req.userRole ?? 'viewer';
+  if (roleLevel(role as Role) > roleLevel(requesterRole)) {
+    denyAuthorization(
+      req,
+      res,
+      'role_escalation',
+      `A '${requesterRole}' key cannot create a '${role}' key`,
+      { requiredRole: role as Role },
+    );
+    return;
   }
 
   const limit = typeof rateLimitPerMin === 'number' && rateLimitPerMin >= 1
@@ -82,12 +117,12 @@ router.post('/keys', (req: Request, res: Response) => {
   }
 });
 
-router.get('/keys', (_req: Request, res: Response) => {
+router.get('/keys', requireRole('viewer', 'keys:read'), (_req: Request, res: Response) => {
   const keys = apiKeyManager.getAllKeys();
   res.json({ success: true, data: { count: keys.length, keys } });
 });
 
-router.get('/keys/:keyHash', (req: Request, res: Response) => {
+router.get('/keys/:keyHash', requireRole('viewer', 'keys:read'), (req: Request, res: Response) => {
   const keyInfo = apiKeyManager.findByHash(req.params.keyHash);
   if (!keyInfo) {
     return res.status(404).json({
@@ -98,14 +133,9 @@ router.get('/keys/:keyHash', (req: Request, res: Response) => {
   res.json({ success: true, data: keyInfo });
 });
 
-router.post('/keys/:keyHash/rotate', (req: Request, res: Response) => {
-  const existing = apiKeyManager.findByHash(req.params.keyHash);
-  if (!existing) {
-    return res.status(404).json({
-      success: false,
-      error: { code: 'KEY_NOT_FOUND', message: 'API key not found' },
-    });
-  }
+router.post('/keys/:keyHash/rotate', requireRole('operator', 'keys:rotate'), (req: Request, res: Response) => {
+  const existing = guardTargetKey(req, res);
+  if (!existing) return;
 
   const rotated = apiKeyManager.rotateKey(req.params.keyHash);
   if (!rotated) {
@@ -129,7 +159,7 @@ router.post('/keys/:keyHash/rotate', (req: Request, res: Response) => {
   });
 });
 
-router.put('/keys/:keyHash/tier', (req: Request, res: Response) => {
+router.put('/keys/:keyHash/tier', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
   const { tier } = req.body;
   const validTiers: KeyTier[] = ['free', 'pro', 'enterprise', 'admin'];
 
@@ -140,13 +170,8 @@ router.put('/keys/:keyHash/tier', (req: Request, res: Response) => {
     });
   }
 
-  const existing = apiKeyManager.findByHash(req.params.keyHash);
-  if (!existing) {
-    return res.status(404).json({
-      success: false,
-      error: { code: 'KEY_NOT_FOUND', message: 'API key not found' },
-    });
-  }
+  const existing = guardTargetKey(req, res);
+  if (!existing) return;
 
   apiKeyManager.updateTier(req.params.keyHash, tier as KeyTier);
   res.json({
@@ -155,7 +180,7 @@ router.put('/keys/:keyHash/tier', (req: Request, res: Response) => {
   });
 });
 
-router.put('/keys/:keyHash/rate-limit', (req: Request, res: Response) => {
+router.put('/keys/:keyHash/rate-limit', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
   const { rateLimitPerMin } = req.body;
 
   if (typeof rateLimitPerMin !== 'number' || rateLimitPerMin < 1) {
@@ -165,26 +190,16 @@ router.put('/keys/:keyHash/rate-limit', (req: Request, res: Response) => {
     });
   }
 
-  const existing = apiKeyManager.findByHash(req.params.keyHash);
-  if (!existing) {
-    return res.status(404).json({
-      success: false,
-      error: { code: 'KEY_NOT_FOUND', message: 'API key not found' },
-    });
-  }
+  const existing = guardTargetKey(req, res);
+  if (!existing) return;
 
   apiKeyManager.updateRateLimit(req.params.keyHash, rateLimitPerMin);
   res.json({ success: true, data: { keyHash: req.params.keyHash, rateLimitPerMin } });
 });
 
-router.post('/keys/:keyHash/revoke', (req: Request, res: Response) => {
-  const existing = apiKeyManager.findByHash(req.params.keyHash);
-  if (!existing) {
-    return res.status(404).json({
-      success: false,
-      error: { code: 'KEY_NOT_FOUND', message: 'API key not found' },
-    });
-  }
+router.post('/keys/:keyHash/revoke', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
+  const existing = guardTargetKey(req, res);
+  if (!existing) return;
 
   apiKeyManager.revokeKey(req.params.keyHash);
   logger.info(`Admin ${req.apiKey?.substring(0, 8)}... revoked key ${req.params.keyHash}`);
@@ -201,21 +216,16 @@ router.post('/keys/:keyHash/revoke', (req: Request, res: Response) => {
   res.json({ success: true, data: { keyHash: req.params.keyHash, action: 'revoked' } });
 });
 
-router.post('/keys/:keyHash/reactivate', (req: Request, res: Response) => {
-  const existing = apiKeyManager.findByHash(req.params.keyHash);
-  if (!existing) {
-    return res.status(404).json({
-      success: false,
-      error: { code: 'KEY_NOT_FOUND', message: 'API key not found' },
-    });
-  }
+router.post('/keys/:keyHash/reactivate', requireRole('operator', 'keys:write'), (req: Request, res: Response) => {
+  const existing = guardTargetKey(req, res);
+  if (!existing) return;
 
   apiKeyManager.reactivateKey(req.params.keyHash);
   logger.info(`Admin ${req.apiKey?.substring(0, 8)}... reactivated key ${req.params.keyHash}`);
   res.json({ success: true, data: { keyHash: req.params.keyHash, action: 'reactivated' } });
 });
 
-router.delete('/keys/:keyHash', (req: Request, res: Response) => {
+router.delete('/keys/:keyHash', requireRole('admin', 'keys:delete'), (req: Request, res: Response) => {
   const existing = apiKeyManager.findByHash(req.params.keyHash);
   if (!existing) {
     return res.status(404).json({
@@ -231,11 +241,11 @@ router.delete('/keys/:keyHash', (req: Request, res: Response) => {
 
 // ── CORS Management ───────────────────────────────────────────────────────────
 
-router.get('/cors/origins', (_req: Request, res: Response) => {
+router.get('/cors/origins', requireRole('viewer', 'cors:read'), (_req: Request, res: Response) => {
   res.json({ success: true, data: { origins: corsManager.listOrigins() } });
 });
 
-router.post('/cors/origins', (req: Request, res: Response) => {
+router.post('/cors/origins', requireRole('admin', 'cors:write'), (req: Request, res: Response) => {
   const { origin } = req.body;
 
   if (!origin || typeof origin !== 'string') {
@@ -253,7 +263,7 @@ router.post('/cors/origins', (req: Request, res: Response) => {
   });
 });
 
-router.delete('/cors/origins', (req: Request, res: Response) => {
+router.delete('/cors/origins', requireRole('admin', 'cors:write'), (req: Request, res: Response) => {
   const { origin } = req.body;
 
   if (!origin || typeof origin !== 'string') {
@@ -276,7 +286,7 @@ router.delete('/cors/origins', (req: Request, res: Response) => {
 
 // ── Database Pool & Replicas (issues #44, #45) ─────────────────────────────────
 
-router.get('/db/pool', async (_req: Request, res: Response) => {
+router.get('/db/pool', requireRole('viewer', 'system:read'), async (_req: Request, res: Response) => {
   if (!isDbAvailable()) {
     return res.status(503).json({
       success: false,
@@ -289,7 +299,7 @@ router.get('/db/pool', async (_req: Request, res: Response) => {
 
 // ── Data Archival (issue #43) ──────────────────────────────────────────────────
 
-router.post('/archival/run', async (req: Request, res: Response) => {
+router.post('/archival/run', requireRole('operator', 'archival:write'), async (req: Request, res: Response) => {
   if (!isDbAvailable()) {
     return res.status(503).json({
       success: false,
@@ -315,7 +325,7 @@ router.post('/archival/run', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/archival/restore', async (req: Request, res: Response) => {
+router.post('/archival/restore', requireRole('admin', 'archival:write'), async (req: Request, res: Response) => {
   if (!isDbAvailable()) {
     return res.status(503).json({
       success: false,
@@ -343,7 +353,7 @@ router.post('/archival/restore', async (req: Request, res: Response) => {
 
 // ── DB Health Monitor (Issue: connection exhaustion / slow queries / lag) ──────
 
-router.get('/db/health', async (_req: Request, res: Response) => {
+router.get('/db/health', requireRole('viewer', 'system:read'), async (_req: Request, res: Response) => {
   if (!isDbAvailable()) {
     return res.status(503).json({
       success: false,
@@ -367,7 +377,7 @@ router.get('/db/health', async (_req: Request, res: Response) => {
 
 // ── Data Consistency (Issue: no cross-layer verification) ─────────────────────
 
-router.post('/consistency/check', async (_req: Request, res: Response) => {
+router.post('/consistency/check', requireRole('operator', 'consistency:write'), async (_req: Request, res: Response) => {
   if (!isDbAvailable()) {
     return res.status(503).json({
       success: false,
@@ -397,7 +407,7 @@ router.post('/consistency/check', async (_req: Request, res: Response) => {
 
 // ── Backup (Issue: no backup system) ──────────────────────────────────────────
 
-router.post('/backup/run', async (_req: Request, res: Response) => {
+router.post('/backup/run', requireRole('operator', 'backup:write'), async (_req: Request, res: Response) => {
   if (!config.databaseUrl) {
     return res.status(503).json({
       success: false,
@@ -421,7 +431,7 @@ router.post('/backup/run', async (_req: Request, res: Response) => {
   }
 });
 
-router.get('/backup/list', (_req: Request, res: Response) => {
+router.get('/backup/list', requireRole('viewer', 'backup:read'), (_req: Request, res: Response) => {
   const svc = new BackupService(config.databaseUrl || '', logger, {
     backupDir: config.backup.dir,
   });
@@ -434,7 +444,7 @@ router.get('/backup/list', (_req: Request, res: Response) => {
   res.json({ success: true, data: { count: backups.length, backups } });
 });
 
-router.post('/backup/test-restore', async (_req: Request, res: Response) => {
+router.post('/backup/test-restore', requireRole('admin', 'backup:write'), async (_req: Request, res: Response) => {
   if (!config.databaseUrl) {
     return res.status(503).json({
       success: false,
@@ -458,7 +468,7 @@ router.post('/backup/test-restore', async (_req: Request, res: Response) => {
   }
 });
 
-router.post('/backup/restore', async (req: Request, res: Response) => {
+router.post('/backup/restore', requireRole('admin', 'backup:write'), async (req: Request, res: Response) => {
   if (!config.databaseUrl) {
     return res.status(503).json({
       success: false,
@@ -491,7 +501,7 @@ router.post('/backup/restore', async (req: Request, res: Response) => {
 
 // ── Disaster Recovery (issue #106) ─────────────────────────────────────────────
 
-router.get('/dr/status', (_req: Request, res: Response) => {
+router.get('/dr/status', requireRole('viewer', 'dr:read'), (_req: Request, res: Response) => {
   if (!config.databaseUrl) {
     return res.status(503).json({
       success: false,
@@ -508,7 +518,7 @@ router.get('/dr/status', (_req: Request, res: Response) => {
 
 // ── Circuit Breaker Management (issue #233) ───────────────────────────────────
 
-router.get('/circuit-breakers', async (_req: Request, res: Response) => {
+router.get('/circuit-breakers', requireRole('viewer', 'system:read'), async (_req: Request, res: Response) => {
   try {
     if (isDbAvailable()) {
       const db = await getDb();
@@ -525,7 +535,7 @@ router.get('/circuit-breakers', async (_req: Request, res: Response) => {
   }
 });
 
-router.post('/circuit-breakers/:source/reset', async (req: Request, res: Response) => {
+router.post('/circuit-breakers/:source/reset', requireRole('operator', 'circuit:write'), async (req: Request, res: Response) => {
   const { source } = req.params;
   if (!source) {
     return res.status(400).json({
@@ -546,7 +556,7 @@ router.post('/circuit-breakers/:source/reset', async (req: Request, res: Respons
   res.json({ success: true, data: { source, status: sourceCircuitBreakers.status(source) } });
 });
 
-router.post('/circuit-breakers/reset-all', (_req: Request, res: Response) => {
+router.post('/circuit-breakers/reset-all', requireRole('operator', 'circuit:write'), (_req: Request, res: Response) => {
   const resetCount = sourceCircuitBreakers.resetAll();
   logger.info(`Admin ${_req.apiKey?.substring(0, 8)}... reset ${resetCount} circuit breaker(s)`);
   res.json({ success: true, data: { resetCount } });
@@ -554,7 +564,7 @@ router.post('/circuit-breakers/reset-all', (_req: Request, res: Response) => {
 
 // ── Admin Health ──────────────────────────────────────────────────────────────
 
-router.get('/health', (req: Request, res: Response) => {
+router.get('/health', requireRole('viewer', 'system:read'), (req: Request, res: Response) => {
   const tierLimits = TIER_RATE_LIMITS;
   res.json({
     success: true,
