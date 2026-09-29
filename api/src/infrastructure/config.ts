@@ -33,6 +33,11 @@ export const config = {
     .map((url) => url.trim())
     .filter(Boolean),
   geoIpDatabasePath: process.env.GEOIP_DATABASE_PATH || '',
+  publicBaseUrl: process.env.PUBLIC_BASE_URL || '',
+  publicAllowedHosts: (process.env.PUBLIC_BASE_ALLOWED_HOSTS || '')
+    .split(',')
+    .map((host) => host.trim())
+    .filter(Boolean),
   cacheTtlMs: parseInt(process.env.CACHE_TTL_MS || '15000', 10),
   redisUrl: optionalSecretEnv('REDIS_URL'),
   priceCacheTtl: parseInt(process.env.PRICE_CACHE_TTL_MS || '15000', 10),
