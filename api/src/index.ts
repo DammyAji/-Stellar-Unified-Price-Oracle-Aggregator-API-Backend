@@ -80,6 +80,22 @@ async function initializeApp(): Promise<void> {
       }
     }
     logger.info('Vault secrets engine initialized');
+
+    corsManager.setStore({
+      load: async () => {
+        const data = await vault.readSecret<{ origins?: string[] }>('secret/data/cors/origins');
+        if (!data || !Array.isArray(data.origins)) return [];
+        return data.origins.filter((o): o is string => typeof o === 'string');
+      },
+      save: async (origins: string[]) => {
+        await vault.writeSecret('secret/data/cors/origins', { origins });
+      },
+    });
+    await corsManager.hydrate();
+    const corsRefreshTimer = setInterval(() => {
+      corsManager.hydrate().catch((err) => logger.warn('CORS allowlist refresh failed', err));
+    }, 30_000);
+    corsRefreshTimer.unref();
   } catch (err) {
     logger.warn('Vault not available — using in-memory API key store fallback', err);
   }

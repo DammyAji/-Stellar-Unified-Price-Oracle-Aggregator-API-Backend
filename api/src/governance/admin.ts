@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { apiKeyManager, TIER_RATE_LIMITS, KeyTier } from './api-key-manager';
 import { corsManager } from './cors-manager';
+import { recordComplianceAudit } from './compliance';
 import { adminAuthMiddleware } from './auth';
 import { logger } from '../observability/logger';
 import { auditLog } from './audit-logger';
@@ -245,7 +246,7 @@ router.get('/cors/origins', requireRole('viewer', 'cors:read'), (_req: Request, 
   res.json({ success: true, data: { origins: corsManager.listOrigins() } });
 });
 
-router.post('/cors/origins', requireRole('admin', 'cors:write'), (req: Request, res: Response) => {
+router.post('/cors/origins', requireRole('admin', 'cors:write'), async (req: Request, res: Response) => {
   const { origin } = req.body;
 
   if (!origin || typeof origin !== 'string') {
@@ -255,15 +256,56 @@ router.post('/cors/origins', requireRole('admin', 'cors:write'), (req: Request, 
     });
   }
 
+  const validation = corsManager.validateOrigin(origin);
+  if (!validation.valid) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_ORIGIN', message: validation.reason },
+    });
+  }
+
+  const before = corsManager.listOrigins();
+  if (before.includes(origin)) {
+    return res.status(200).json({
+      success: true,
+      data: { origin, added: false, origins: before },
+    });
+  }
+
   const added = corsManager.addOrigin(origin);
-  const status = added ? 201 : 200;
-  res.status(status).json({
+  if (!added) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'ORIGIN_UPDATE_FAILED', message: 'Failed to add origin to the allowlist' },
+    });
+  }
+
+  try {
+    await corsManager.syncToStore();
+  } catch (err) {
+    corsManager.restore(before);
+    logger.error('Failed to persist CORS allowlist change; rolled back', err);
+    return res.status(500).json({
+      success: false,
+      error: { code: 'STORE_WRITE_FAILED', message: 'Failed to persist allowlist change; change was rolled back' },
+    });
+  }
+
+  const after = corsManager.listOrigins();
+  recordComplianceAudit('cors.allowlist.change', req, 'add_cors_origin', 'success', { origin, before, after });
+  eventBus.publish({
+    type: 'cors-allowlist-changed',
+    payload: { origin, action: 'added', before, after, actor: req.apiKey?.substring(0, 8) || 'unknown' },
+    timestamp: Date.now(),
+  });
+
+  res.status(201).json({
     success: true,
-    data: { origin, added, origins: corsManager.listOrigins() },
+    data: { origin, added, origins: after },
   });
 });
 
-router.delete('/cors/origins', requireRole('admin', 'cors:write'), (req: Request, res: Response) => {
+router.delete('/cors/origins', requireRole('admin', 'cors:write'), async (req: Request, res: Response) => {
   const { origin } = req.body;
 
   if (!origin || typeof origin !== 'string') {
@@ -273,6 +315,15 @@ router.delete('/cors/origins', requireRole('admin', 'cors:write'), (req: Request
     });
   }
 
+  const validation = corsManager.validateOrigin(origin);
+  if (!validation.valid) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_ORIGIN', message: validation.reason },
+    });
+  }
+
+  const before = corsManager.listOrigins();
   const removed = corsManager.removeOrigin(origin);
   if (!removed) {
     return res.status(404).json({
@@ -281,7 +332,26 @@ router.delete('/cors/origins', requireRole('admin', 'cors:write'), (req: Request
     });
   }
 
-  res.json({ success: true, data: { origin, removed: true, origins: corsManager.listOrigins() } });
+  try {
+    await corsManager.syncToStore();
+  } catch (err) {
+    corsManager.restore(before);
+    logger.error('Failed to persist CORS allowlist change; rolled back', err);
+    return res.status(500).json({
+      success: false,
+      error: { code: 'STORE_WRITE_FAILED', message: 'Failed to persist allowlist change; change was rolled back' },
+    });
+  }
+
+  const after = corsManager.listOrigins();
+  recordComplianceAudit('cors.allowlist.change', req, 'remove_cors_origin', 'success', { origin, before, after });
+  eventBus.publish({
+    type: 'cors-allowlist-changed',
+    payload: { origin, action: 'removed', before, after, actor: req.apiKey?.substring(0, 8) || 'unknown' },
+    timestamp: Date.now(),
+  });
+
+  res.json({ success: true, data: { origin, removed: true, origins: after } });
 });
 
 // ── Database Pool & Replicas (issues #44, #45) ─────────────────────────────────
