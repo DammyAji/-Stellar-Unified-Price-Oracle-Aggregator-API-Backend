@@ -16,7 +16,8 @@ import { sanitizeInputs } from './governance/sanitization';
 import { httpsRedirect, hstsHeaders } from './infrastructure/https';
 import { compressionMiddleware } from './infrastructure/compression';
 import { usageTrackingMiddleware } from './governance/usage-tracking';
-import { complianceAuditMiddleware } from './governance/compliance';
+import { complianceAuditMiddleware, setDsarStore, hydrateDsars } from './governance/compliance';
+import type { DsarRecord } from './governance/dsar-store';
 import { PriceWebSocketServer } from './infrastructure/server';
 import { swaggerSpec } from './infrastructure/openapi';
 import v1Routes, { initializeCache } from './price-serving/v1';
@@ -96,6 +97,18 @@ async function initializeApp(): Promise<void> {
       corsManager.hydrate().catch((err) => logger.warn('CORS allowlist refresh failed', err));
     }, 30_000);
     corsRefreshTimer.unref();
+
+    setDsarStore({
+      load: async (): Promise<DsarRecord[]> => {
+        const data = await vault.readSecret<{ requests?: DsarRecord[] }>('secret/data/compliance/dsars');
+        if (!data || !Array.isArray(data.requests)) return [];
+        return data.requests;
+      },
+      save: async (records) => {
+        await vault.writeSecret('secret/data/compliance/dsars', { requests: records });
+      },
+    });
+    await hydrateDsars();
   } catch (err) {
     logger.warn('Vault not available — using in-memory API key store fallback', err);
   }

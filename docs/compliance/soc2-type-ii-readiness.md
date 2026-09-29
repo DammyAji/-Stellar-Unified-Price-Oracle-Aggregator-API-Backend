@@ -26,6 +26,27 @@ Required follow-up actions:
 - merge access review and key rotation records into the same evidence feed
 - automate quarterly reporting into the security evidence bucket
 
+## Runtime control verification
+
+The controls that the API can prove by itself are executed at report time
+(`GET /api/v1/compliance/reports/soc2`, the dashboard, and scheduled reports)
+and are labelled per control:
+
+| Control | Verification | What runs | Result recorded |
+| --- | --- | --- | --- |
+| CC6.1 Logical access | automated | scans `api/src/governance/admin.ts` and verifies every admin route declares `requireRole(minRole, permission)` | `controls[].lastCheckedAt`, `controls[].lastResult` |
+| CC7.2 Monitoring | automated | parses `docs/security/audit-findings.md` with the same rules as `scripts/check-audit-findings.js` (open Critical findings ⇒ gap) | `controls[].lastCheckedAt`, `controls[].lastResult` |
+| CC8.1 Change management | automated | verifies `.github/workflows/ci.yml` exists | `controls[].lastCheckedAt`, `controls[].lastResult` |
+| CC6.6, CC7.4, A1.2, A1.3 | manual | none — labelled `verification: "manual"` so reports never present them as checked | `controls[].verification` |
+
+Every report also carries `controlsByVerification` (automated vs manual
+counts) so a reviewer can see which assertions come from a check and which
+require sign-off. Retention policies are labelled the same way: `audit_logs`
+and `debug_logs` are `enforcement: "automatic"` (executed by the daily
+enforcement pass in `api/src/governance/compliance.ts`), while `price_data`
+and `raw_source_payloads` are `enforcement: "external"` and explicitly
+reported as documented-but-not-executed-here.
+
 ## Gaps to track
 
 - finalise a formal incident response playbook with escalation ownership
