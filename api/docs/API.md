@@ -66,6 +66,16 @@ X-RateLimit-Reset: 1719000060
 ```
 
 Exceeding a limit returns `429 Too Many Requests` with `error.code: RATE_LIMITED`.
+
+Decision semantics: every admitted request increments **every layer**, so
+`X-RateLimit-Consumed`/`X-RateLimit-Remaining` always describe the count of
+the request being served and the strictest layer decides the response (blocked
+beats allowed; among allowed layers the lowest remaining wins). Blocked
+decisions are cached for 50 ms per layer and window — a repeat rejection
+within that window is replayed without consuming that layer again, while the
+remaining layers are still evaluated. Local counters mirror the Redis sliding
+window, so a Redis outage continues a tenant's usage instead of resetting it.
+
 The `/metrics` endpoint is exempt from rate limiting.
 
 ## Error Format

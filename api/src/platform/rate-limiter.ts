@@ -19,8 +19,28 @@ interface Decision {
   degraded: boolean;
 }
 
+/**
+ * Per-key sliding-window counts. This map is a *mirror* of the authoritative
+ * counter (Redis when healthy, local when degraded): every successful Redis
+ * increment writes the resulting count back here, so a Redis outage continues
+ * from the last known count instead of resetting the tenant's usage, and a
+ * Redis restart is reconciled upward (incrby) when the mirror ran ahead.
+ */
 const windows = new Map<string, { windowStart: number; count: number }>();
-const cache = new Map<string, { expires: number; decision: Decision }>();
+
+/**
+ * Decision cache (50 ms). Only BLOCKED decisions are cached — rejections are
+ * idempotent and safe to repeat without consuming the layer again. Allowed
+ * decisions are never cached: a request that is admitted always increments
+ * every layer, so no path can return "allowed" without consuming a unit and
+ * headers always describe fresh state. Cached blocks are keyed by window and
+ * re-read the current count for header accuracy; every layer is still
+ * evaluated per request and the strictest decision wins.
+ */
+const blockCache = new Map<string, { expires: number; decision: Decision }>();
+const BLOCK_CACHE_TTL_MS = 50;
+const BLOCK_CACHE_MAX_ENTRIES = 5000;
+
 const redis = config.redisUrl ? new Redis(config.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 1 }) : null;
 let redisHealthy = false;
 
@@ -57,17 +77,25 @@ function adjustedLimit(layer: Layer, req: Request, degraded: boolean): number {
   return Math.max(1, Math.floor(baseLimits[layer] * regionMultiplier(req) * dynamic * degradation));
 }
 
-async function increment(key: string, degraded: boolean): Promise<{ count: number; reset: number }> {
-  const now = Date.now();
+async function increment(
+  key: string,
+  degraded: boolean,
+  windowStart: number,
+  reset: number,
+): Promise<{ count: number; reset: number }> {
   const windowMs = config.rateLimitWindowMs;
-  const windowStart = now - (now % windowMs);
-  const reset = Math.ceil((windowStart + windowMs) / 1000);
   if (!degraded && redis && (await ensureRedis())) {
     const started = performance.now();
     try {
       const redisKey = `rl:${windowStart}:${key}`;
-      const count = await redis.incr(redisKey);
+      let count = await redis.incr(redisKey);
       if (count === 1) await redis.pexpire(redisKey, windowMs * 2);
+      const mirrored = windows.get(key);
+      if (mirrored && mirrored.windowStart === windowStart && mirrored.count + 1 > count) {
+        count = await redis.incrby(redisKey, mirrored.count + 1 - count);
+      }
+      windows.set(key, { windowStart, count });
+      rateLimitCounterSize.set(windows.size);
       rateLimitRedisLatency.observe((performance.now() - started) / 1000);
       return { count, reset };
     } catch {
@@ -84,6 +112,43 @@ async function increment(key: string, degraded: boolean): Promise<{ count: numbe
   return { count: current.count, reset };
 }
 
+/** Non-consuming read of the current count, used for headers on cached blocks. */
+async function readCount(key: string, degraded: boolean, windowStart: number): Promise<number | null> {
+  if (!degraded && redis && (await ensureRedis())) {
+    try {
+      const raw = await redis.get(`rl:${windowStart}:${key}`);
+      if (raw !== null) return Number(raw);
+    } catch {
+      redisHealthy = false;
+    }
+  }
+  const current = windows.get(key);
+  if (current && current.windowStart === windowStart) return current.count;
+  return null;
+}
+
+/** Strictest decision wins: blocked beats allowed; among allowed, lowest remaining; among blocked, the earliest layer. */
+function stricter(current: Decision | null, candidate: Decision): Decision {
+  if (!current) return candidate;
+  if (current.allowed !== candidate.allowed) return current.allowed ? candidate : current;
+  if (!current.allowed) return current;
+  return candidate.remaining < current.remaining ? candidate : current;
+}
+
+function setBlockCache(cacheKey: string, now: number, decision: Decision): void {
+  if (blockCache.size >= BLOCK_CACHE_MAX_ENTRIES) {
+    for (const [key, entry] of blockCache) {
+      if (entry.expires <= now) blockCache.delete(key);
+    }
+    while (blockCache.size >= BLOCK_CACHE_MAX_ENTRIES) {
+      const oldest = blockCache.keys().next();
+      if (oldest.done) break;
+      blockCache.delete(oldest.value);
+    }
+  }
+  blockCache.set(cacheKey, { expires: now + BLOCK_CACHE_TTL_MS, decision });
+}
+
 async function evaluate(req: Request): Promise<Decision> {
   const tenant = String(req.headers['x-api-key'] || 'anonymous');
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
@@ -95,13 +160,33 @@ async function evaluate(req: Request): Promise<Decision> {
     ['endpoint', `endpoint:${endpoint}`],
   ];
   const degraded = !(await ensureRedis());
+  const windowMs = config.rateLimitWindowMs;
+  const now = Date.now();
+  const windowStart = now - (now % windowMs);
+  const reset = Math.ceil((windowStart + windowMs) / 1000);
+
+  let strictest: Decision | null = null;
   for (const [layer, key] of keys) {
     const limit = adjustedLimit(layer, req, degraded);
-    const cacheKey = `${layer}:${key}:${limit}`;
-    const cached = cache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return cached.decision;
-    const { count, reset } = await increment(key, degraded);
-    const decision = {
+    const cacheKey = `${layer}:${key}:${limit}:${windowStart}`;
+    const cached = blockCache.get(cacheKey);
+    if (cached && cached.expires > now) {
+      const current = await readCount(key, degraded, windowStart);
+      if (current !== null) {
+        strictest = stricter(strictest, {
+          allowed: false,
+          layer,
+          limit,
+          remaining: 0,
+          reset,
+          consumed: current,
+          degraded,
+        });
+        continue;
+      }
+    }
+    const { count } = await increment(key, degraded, windowStart, reset);
+    const decision: Decision = {
       allowed: count <= limit,
       layer,
       limit,
@@ -110,10 +195,10 @@ async function evaluate(req: Request): Promise<Decision> {
       consumed: count,
       degraded,
     };
-    cache.set(cacheKey, { expires: Date.now() + 50, decision });
-    if (!decision.allowed) return decision;
+    if (!decision.allowed) setBlockCache(cacheKey, now, decision);
+    strictest = stricter(strictest, decision);
   }
-  return { allowed: true, layer: 'endpoint', limit: baseLimits.endpoint, remaining: baseLimits.endpoint, reset: Math.ceil((Date.now() + config.rateLimitWindowMs) / 1000), consumed: 0, degraded };
+  return strictest!;
 }
 
 export async function distributedRateLimiter(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -146,7 +231,10 @@ export function rateLimitStatus() {
     layers: Object.keys(baseLimits),
     redisConfigured: Boolean(redis),
     counterSize: windows.size,
-    decisionCacheTtlMs: 50,
+    blockCacheTtlMs: BLOCK_CACHE_TTL_MS,
+    blockCacheSize: blockCache.size,
   };
 }
 
+/** Exposed for tests: the counter mirror and the block-decision cache. */
+export const __rateLimitInternals = { windows, blockCache };
