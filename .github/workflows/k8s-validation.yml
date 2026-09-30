@@ -45,3 +45,69 @@ jobs:
         run: |
           chmod +x scripts/validate-k8s.sh
           ./scripts/validate-k8s.sh
+
+      - name: Require a PodDisruptionBudget for every Deployment
+        run: |
+          python3 - <<'PY'
+          import glob
+          import sys
+
+          import yaml
+
+          # Every stateless Deployment must ship with a matching PodDisruptionBudget
+          # so a node drain / cluster upgrade cannot evict all replicas at once.
+          # A PDB "matches" a Deployment when its selector selects the Deployment's
+          # pod template labels (the same labels the Deployment's own selector uses).
+          deployments = {}
+          pdbs = []
+
+          for path in glob.glob('k8s/**/*.yaml', recursive=True) + glob.glob('k8s/**/*.yml', recursive=True):
+              with open(path) as fh:
+                  try:
+                      docs = list(yaml.safe_load_all(fh))
+                  except yaml.YAMLError as exc:
+                      print(f'::error file={path}::failed to parse YAML: {exc}')
+                      sys.exit(1)
+              for doc in docs:
+                  if not isinstance(doc, dict):
+                      continue
+                  kind = doc.get('kind')
+                  if kind == 'Deployment':
+                      name = doc.get('metadata', {}).get('name', '<unnamed>')
+                      labels = (
+                          doc.get('spec', {})
+                          .get('selector', {})
+                          .get('matchLabels', {})
+                      )
+                      deployments[f'{path}:{name}'] = labels
+                  elif kind == 'PodDisruptionBudget':
+                      labels = (
+                          doc.get('spec', {})
+                          .get('selector', {})
+                          .get('matchLabels', {})
+                      )
+                      pdbs.append((path, labels))
+
+          def selects(selector, labels):
+              if not selector:
+                  return False
+              return all(labels.get(k) == v for k, v in selector.items())
+
+          missing = []
+          for dep_id, dep_labels in deployments.items():
+              if not any(selects(sel, dep_labels) for _, sel in pdbs):
+                  missing.append(dep_id)
+
+          if missing:
+              for dep_id in missing:
+                  print(
+                      f'::error::{dep_id} has no matching PodDisruptionBudget; '
+                      'add one so a node drain cannot take every replica'
+                  )
+              sys.exit(1)
+
+          print(
+              f'OK: all {len(deployments)} Deployment(s) have a matching '
+              f'PodDisruptionBudget ({len(pdbs)} PDB(s) found)'
+          )
+          PY
