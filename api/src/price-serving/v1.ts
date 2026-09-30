@@ -16,6 +16,7 @@ import { Router, Request, Response } from 'express';
 import { conditionalCache } from './conditional-cache';
 import { eventBus } from '../domain-events';
 import complianceRoutes from '../governance/compliance';
+import { apiKeyManager } from '../governance/api-key-manager';
 import { issueWsCsrfToken, isCsrfEnabled } from '../infrastructure/csrf';
 import { config } from '../infrastructure/config';
 import { ok, okCached, fail } from '../infrastructure/response';
@@ -315,7 +316,11 @@ router.get('/health/live', (_req: Request, res: Response) => {
 router.get('/health/ready', async (_req: Request, res: Response) => {
   const prices = await readAssetPrices();
   const ready = prices.length > 0;
-  res.status(ready ? 200 : 503).json({ status: ready ? 'ready' : 'not_ready', assetsTracked: prices.length });
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not_ready',
+    assetsTracked: prices.length,
+    keyStore: apiKeyManager.getBootstrapReport().health,
+  });
 });
 
 router.get('/health', async (req: Request, res: Response) => {

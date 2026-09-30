@@ -6,6 +6,9 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     exclude: ['node_modules', 'dist', '.idea', '.git', '.cache', 'tests/e2e', 'tests/integration'],
+    // Keep existing suites that assert on the legacy fallback behaviour able to
+    // boot without API_KEYS; production refuses to start without a key source.
+    env: { ALLOW_EPHEMERAL_ADMIN_KEY: 'true' },
     testTimeout: 30000,
     hookTimeout: 30000,
     coverage: {

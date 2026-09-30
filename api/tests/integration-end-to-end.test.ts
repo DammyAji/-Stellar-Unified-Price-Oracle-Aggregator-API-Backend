@@ -22,6 +22,12 @@ vi.mock('../src/governance/api-key-manager', () => ({
       resetTime: Date.now() + 60000,
     })),
     isAdminKey: vi.fn(() => true),
+    getBootstrapReport: vi.fn(() => ({
+      source: 'none' as const,
+      count: 0,
+      health: 'empty' as const,
+      ephemeral: false,
+    })),
   },
 }));
 

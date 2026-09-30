@@ -500,6 +500,12 @@ const options: swaggerJsdoc.Options = {
           properties: {
             status: { type: 'string', enum: ['ready', 'not_ready'] },
             assetsTracked: { type: 'integer', example: 5 },
+            keyStore: {
+              type: 'string',
+              enum: ['empty', 'env-seeded', 'store-backed'],
+              description: 'Durability of the configured API key store.',
+              example: 'env-seeded',
+            },
           },
         },
         PaginationMeta: {

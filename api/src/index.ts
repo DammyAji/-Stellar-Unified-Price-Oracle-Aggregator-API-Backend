@@ -42,7 +42,7 @@ import eventRoutes from './routes/events';
 import governanceRoutes from './governance/proposal-routes';
 import { uptimeTracker } from './observability/uptime-tracker';
 import { getVaultClient } from '@stellar-oracle/vault-client';
-import { apiKeyManager } from './governance/api-key-manager';
+import { apiKeyManager, bootstrapApiKeyStore } from './governance/api-key-manager';
 import { startAuditRetentionScheduler, stopAuditRetentionScheduler } from './governance/audit-logger';
 import webhooksRoutes from './webhooks/webhooks';
 import graphqlRoutes from './graphql';
@@ -84,6 +84,9 @@ async function initializeApp(): Promise<void> {
   } catch (err) {
     logger.warn('Vault not available — using in-memory API key store fallback', err);
   }
+
+  // Fail closed in production when no key source exists (issue #592).
+  bootstrapApiKeyStore();
 
   if (config.databaseUrl) {
     try {
