@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import { config } from './infrastructure/config';
 import { corsManager } from './governance/cors-manager';
@@ -16,8 +15,8 @@ import { sanitizeInputs } from './governance/sanitization';
 import { httpsRedirect, hstsHeaders } from './infrastructure/https';
 import { compressionMiddleware } from './infrastructure/compression';
 import { usageTrackingMiddleware } from './governance/usage-tracking';
-import { complianceAuditMiddleware, setDsarStore, hydrateDsars } from './governance/compliance';
-import type { DsarRecord } from './governance/dsar-store';
+import { complianceAuditMiddleware } from './governance/compliance';
+import { distributedRateLimiter } from './platform/rate-limiter';
 import { PriceWebSocketServer } from './infrastructure/server';
 import { swaggerSpec } from './infrastructure/openapi';
 import v1Routes, { initializeCache } from './price-serving/v1';
@@ -31,8 +30,6 @@ import { DataConsistencyChecker } from './infrastructure/data-consistency';
 import { BackupService } from './infrastructure/backup';
 import { setDatabase } from './price-serving/price-store';
 import { initializeTracing } from './observability/tracing';
-import { AppError } from './infrastructure/app-error';
-import { ErrorCode } from './infrastructure/catalog';
 import platformRoutes from './platform/routes';
 import adminRoutes from './governance/admin';
 import selfServiceRoutes from './governance/self-service';
@@ -44,8 +41,9 @@ import governanceRoutes from './governance/proposal-routes';
 import { uptimeTracker } from './observability/uptime-tracker';
 import { getVaultClient } from '@stellar-oracle/vault-client';
 import { apiKeyManager } from './governance/api-key-manager';
+import { initializeAuditIntegrity, startAuditChainVerification } from './governance/audit-logger';
 import webhooksRoutes from './webhooks/webhooks';
-import graphqlRoutes from './graphql';
+import graphqlRoutes, { initializeGraphqlCache } from './graphql';
 import releaseNotesRoutes from './release-notes/router';
 
 // Initialize distributed tracing
@@ -185,6 +183,7 @@ const cache = new HybridCache<unknown>(logger, {
 initializeCache(cache);
 initializeCacheV2(cache);
 initializeSandboxCache(cache);
+initializeGraphqlCache(cache);
 
 app.use(helmet());
 app.use(cors(corsManager.getCorsOptions()));
@@ -202,24 +201,7 @@ app.use(requestLogger);
 app.use(metricsMiddleware);
 app.use(usageTrackingMiddleware);
 app.use(complianceAuditMiddleware);
-app.use(
-  rateLimit({
-    windowMs: config.rateLimitWindowMs,
-    max: config.rateLimitMax,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => req.path === '/metrics',
-    handler: (req, res) => {
-      const error = new AppError(
-        ErrorCode.RATE_LIMITED,
-        'Too many requests. Please try again later.',
-        undefined,
-        req.path,
-      );
-      res.status(error.status).json(error.toResponseObject());
-    },
-  }),
-);
+app.use(distributedRateLimiter);
 
 // Apply authentication to price endpoints
 app.use('/api/v1/prices', authMiddleware);
@@ -270,6 +252,9 @@ app.use(errorHandler);
 
 async function startServer(): Promise<void> {
   await initializeApp();
+
+  initializeAuditIntegrity();
+  startAuditChainVerification();
 
   const startupDurationMs = Date.now() - startupStartedAt;
   serviceStartupDurationMs.set({ service: 'api' }, startupDurationMs);

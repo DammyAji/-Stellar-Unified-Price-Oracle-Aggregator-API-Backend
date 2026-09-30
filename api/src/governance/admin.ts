@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { apiKeyManager, TIER_RATE_LIMITS, KeyTier, KeyStoreWriteError, type GeneratedApiKey } from './api-key-manager';
-import { keyMutation } from './key-mutation';
+import { apiKeyManager, TIER_RATE_LIMITS, KeyTier } from './api-key-manager';
+import { clampOverride } from '../platform/limit-model';
 import { corsManager } from './cors-manager';
 import { recordComplianceAudit } from './compliance';
 import { adminAuthMiddleware } from './auth';
@@ -198,9 +198,20 @@ router.put('/keys/:keyHash/rate-limit', requireRole('operator', 'keys:write'), k
   const existing = guardTargetKey(req, res);
   if (!existing) return;
 
-  await apiKeyManager.transact(() => apiKeyManager.updateRateLimit(req.params.keyHash, rateLimitPerMin));
-  res.json({ success: true, data: { keyHash: req.params.keyHash, rateLimitPerMin } });
-}));
+  const decision = clampOverride(existing.tier, rateLimitPerMin);
+  apiKeyManager.updateRateLimit(req.params.keyHash, decision.effective);
+  res.json({
+    success: true,
+    data: {
+      keyHash: req.params.keyHash,
+      tier: existing.tier,
+      rateLimitPerMin: decision.effective,
+      requested: decision.requested,
+      ceiling: decision.ceiling,
+      clamped: decision.clamped,
+    },
+  });
+});
 
 router.post('/keys/:keyHash/revoke', requireRole('operator', 'keys:write'), keyMutation(async (req: Request, res: Response) => {
   const existing = guardTargetKey(req, res);
