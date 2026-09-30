@@ -443,7 +443,6 @@ async function main(): Promise<void> {
 
   fileArchival.start();
 
-<<<<<<< HEAD
   // Issue #579 — one idempotent handler covers SIGTERM and SIGINT.
   const shutdownHooks: ShutdownHooks = {
     flipReadiness: () => {

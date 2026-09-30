@@ -8,6 +8,7 @@ import {
   oracleSourceRequestsTotal,
   oracleSourceSlaBreaches,
   oracleSourceBudgetBlockedTotal,
+  oracleSourceInvalidPayloadsTotal,
   oracleApiCallsTotal,
   oracleApiCostTotal,
   oracleApiBudgetUtilization,
@@ -19,6 +20,11 @@ import {
   BUDGET_WARN_RATIO,
 } from '../infrastructure/cost-model';
 import { sanitizeAssetLabel, sanitizeSourceLabel } from '../observability/cardinality';
+import {
+  scaleValidatedPrice,
+  type ProviderFetchResult,
+} from './response-validation';
+import AlertManager from '../observability/alert-manager';
 
 const SLA_THRESHOLD_SECONDS = 5;
 
@@ -46,12 +52,27 @@ function warnBudgetApproaching(source: string, utilization: number): void {
   const now = Date.now();
   const last = budgetWarnTimestamps.get(`warn:${source}`) ?? 0;
   if (now - last >= BUDGET_WARN_THROTTLE_MS) {
-    budgetWarnTimestamps.set(`warn:${source}`, now);      logger.warn(
+    budgetWarnTimestamps.set(`warn:${source}`, now);
+    logger.warn(
       `[${source}] Daily API budget ${(utilization * 100).toFixed(1)}% utilized (≥ ${BUDGET_WARN_RATIO * 100}%) — approaching exhaustion`,
     );
   }
 }
 
+// Issue #584 — adapter-scoped invalid-payload alerter. A provider schema
+// change must page, not degrade quietly; a shared instance keeps the
+// per-source rate windows consistent across assets.
+const invalidPayloadAlerter = new AlertManager({
+  enableConsoleLog: true,
+  enableFileLog: false,
+});
+
+export type SourceFailureKind = 'transport-error' | 'invalid-payload' | 'no-price';
+
+export interface SourceFetchOutcome {
+  price: NormalizedPrice | null;
+  failureKind?: SourceFailureKind;
+}
 
 export abstract class BaseSource {
   abstract name: OracleSourceName;
@@ -66,6 +87,12 @@ export abstract class BaseSource {
     totalFailures: 0,
     uptimePercent: 100,
   };
+
+  /** Issue #584 — response schema this adapter validates against. */
+  protected readonly schema?: string;
+
+  /** Issue #584 — most recent payload-validation failure, for /health surfacing. */
+  lastInvalidPayloadAt: number | null = null;
 
   private startedAt = Date.now();
 
@@ -92,7 +119,61 @@ export abstract class BaseSource {
     };
   }
 
+  /**
+   * Records an adapter-level schema violation: counted, health-marked, and
+   * (at a sustained rate) alerted (issue #584).
+   */
+  protected recordInvalidPayload(asset: string, issues: string): void {
+    oracleSourceInvalidPayloadsTotal.inc({ source: sanitizeSourceLabel(this.name) });
+    this.lastInvalidPayloadAt = Math.floor(Date.now() / 1000);
+    void invalidPayloadAlerter.checkInvalidPayload(this.name, asset, issues);
+  }
+
+  /**
+   * Normalizes a *validated* provider result. Non-finite or out-of-range
+   * values are rejected before scaling (issue #584) instead of relying on
+   * `BigInt` throwing.
+   */
+  protected normalizeValidated(
+    asset: string,
+    result: Extract<ProviderFetchResult, { kind: 'ok' }>,
+  ): NormalizedPrice | null {
+    const scaled = scaleValidatedPrice(result.price, result.decimals);
+    if (!scaled.ok) {
+      logger.error(`[${this.name}] Rejected ${asset} price before scaling: ${scaled.reason}`, {
+        source: this.name,
+        asset,
+        price: String(result.price),
+        decimals: result.decimals,
+      });
+      oracleSourceInvalidPayloadsTotal.inc({ source: sanitizeSourceLabel(this.name) });
+      this.lastInvalidPayloadAt = Math.floor(Date.now() / 1000);
+      void invalidPayloadAlerter.checkInvalidPayload(this.name, asset, scaled.reason);
+      return null;
+    }
+    const fetchedAt = Math.floor(Date.now() / 1000);
+    return {
+      asset: asset.toUpperCase(),
+      price: scaled.scaled,
+      decimals: result.decimals,
+      source: this.name,
+      timestamp: result.observedAt ?? fetchedAt,
+      observedAt: result.observedAt,
+      fetchedAt,
+    };
+  }
+
   async fetchWithBackoff(asset: string, attempt = 1): Promise<NormalizedPrice | null> {
+    const outcome = await this.fetchWithOutcome(asset, attempt);
+    return outcome.price;
+  }
+
+  /**
+   * Fetch with the full retry/health/circuit-breaker path, reporting *why* a
+   * fetch produced no price: `transport-error`, `invalid-payload`, or
+   * `no-price` (issue #584).
+   */
+  async fetchWithOutcome(asset: string, attempt = 1): Promise<SourceFetchOutcome> {
     // #583 — a source whose daily budget is exhausted stops being polled. This
     // deliberately degrades aggregation quality (fewer sources → wider median
     // spread), so it is a loudly alerted state, not a silent skip.
@@ -101,12 +182,12 @@ export abstract class BaseSource {
       logger.error(
         `[${this.name}] Daily API budget exhausted — skipping fetch for ${asset} until UTC rollover`,
       );
-      return null;
+      return { price: null, failureKind: 'transport-error' };
     }
 
     if (!sourceCircuitBreaker.isAllowed(this.name)) {
       logger.warn(`[${this.name}] Circuit breaker OPEN — skipping fetch for ${asset}`);
-      return null;
+      return { price: null, failureKind: 'transport-error' };
     }
 
     const maxAttempts = 3;
@@ -157,7 +238,7 @@ export abstract class BaseSource {
       this.health.consecutiveFailures = 0;
       this.health.healthy = true;
       sourceCircuitBreaker.recordSuccess(this.name);
-      return price;
+      return { price };
     } catch (err) {
       timer({ status: 'error' });
       oracleSourceRequestsTotal.inc({ source: safeSource, status: 'error' });
@@ -177,11 +258,11 @@ export abstract class BaseSource {
         const delay = Math.min(baseDelay * Math.pow(2, attempt - 1) + Math.random() * 500, 10000);
         logger.warn(`[${this.name}] Retry ${asset} (attempt ${attempt}/${maxAttempts}) after ${delay}ms`, err);
         await new Promise(r => setTimeout(r, delay));
-        return this.fetchWithBackoff(asset, attempt + 1);
+        return this.fetchWithOutcome(asset, attempt + 1);
       }
 
       logger.error(`[${this.name}] Failed to fetch ${asset} after ${maxAttempts} attempts`, err);
-      return null;
+      return { price: null, failureKind: 'transport-error' };
     }
   }
 

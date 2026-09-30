@@ -88,6 +88,15 @@ export const oracleSourceBudgetBlockedTotal = new client.Counter({
   registers: [register],
 });
 
+// Issue #584 — schema violations are a provider contract change, not an
+// ordinary fetch failure. Sustained rates must page, not degrade quietly.
+export const oracleSourceInvalidPayloadsTotal = new client.Counter({
+  name: 'oracle_source_invalid_payloads_total',
+  help: 'Provider responses that failed schema validation, by source',
+  labelNames: ['source'],
+  registers: [register],
+});
+
 // #65 — Cost tracking per oracle API call
 export const oracleApiCallsTotal = new client.Counter({
   name: 'oracle_api_calls_total',
