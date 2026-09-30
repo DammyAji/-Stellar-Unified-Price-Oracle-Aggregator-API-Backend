@@ -1,4 +1,4 @@
-import { config } from './infrastructure/config';
+import { config, redactedConfigView } from './infrastructure/config';
 import { tryCatchAsync } from './infrastructure/result';
 import { logger } from './observability/logger';
 import { ChainlinkSource, RedstoneSource, BandSource, ReflectorSource } from './oracle-sources';
@@ -11,6 +11,7 @@ import { appendUptimeSnapshot } from './persistence/uptime-history';
 import { FileArchivalService } from './persistence/file-archival';
 import { RegionPriceReplicator } from './replication/region-price-replicator';
 import { RegionQuarantineManager } from './replication/region-quarantine';
+import { KafkaReplicator } from './replication/kafka-replicator';
 import {
   oracleSourceUptimePercent,
   onChainPriceStalenessSeconds,
@@ -19,6 +20,10 @@ import {
   pipelineStageLatencyMs,
   pollCycleDurationMs,
   pollCycleOverrunsTotal,
+  regionDriftKnown,
+  regionDriftPercent,
+  regionPeersConfigured,
+  regionPeersReporting,
 } from './observability/metrics';
 import { DatabaseClient } from './persistence/database';
 import { BaseSource } from './oracle-sources/base';
@@ -146,6 +151,7 @@ async function poll(): Promise<AggregatedPrice[]> {
   const replicationStarted = performance.now();
   regionReplicator.mergeLocalPrices(aggregated);
   pipelineStageLatencyMs.observe({ stage: 'replication', status: 'ok' }, performance.now() - replicationStarted);
+  if (replicationPublisher) void replicationPublisher.publish();
   const allSourceNames = ['chainlink', 'redstone', 'band', 'reflector'];
   for (const ap of aggregated) {
     // Publish PriceAggregatedEvent
@@ -200,12 +206,41 @@ async function poll(): Promise<AggregatedPrice[]> {
   }
 
   const drift = regionReplicator.getDriftReport();
+  regionDriftPercent.set({ region: config.region.id }, drift.maxDriftPercent);
+  regionDriftKnown.set({ region: config.region.id }, drift.driftKnown ? 1 : 0);
+  regionPeersReporting.set({ region: config.region.id }, drift.peerCount);
+  if (!drift.driftKnown && config.region.activeActive) {
+    logger.warn('Cross-region drift cannot be computed: no peer region has reported', {
+      region: config.region.id,
+      regionCount: drift.regionCount,
+      configuredPeers: config.region.peers,
+    });
+  }
   if (drift.maxDriftPercent > config.region.driftAlertPercent) {
     logger.warn('Cross-region price drift exceeds threshold', drift);
   }
   const quarantine = regionQuarantine.evaluate(drift);
-  if (quarantine.quarantined) {
-    logger.error(`Region ${config.region.id} quarantined due to cross-region price drift`, quarantine);
+  if (quarantine.transition) {
+    logger[quarantine.quarantined ? 'error' : 'info'](`Region ${config.region.id} ${quarantine.transition}`, {
+      quarantine,
+      drift,
+    });
+    await alertManager.reportRegionQuarantine({
+      region: config.region.id,
+      transition: quarantine.transition,
+      maxDriftPercent: drift.maxDriftPercent,
+      thresholdPercent: config.region.driftAlertPercent,
+      recoverPercent: config.region.quarantineRecoverPercent,
+      driftKnown: drift.driftKnown,
+      regionCount: drift.regionCount,
+      peerCount: drift.peerCount,
+    });
+  }
+  if (publisher) {
+    publisher.setPublishingEnabled(
+      !quarantine.quarantined,
+      quarantine.quarantined ? quarantine.reason ?? 'cross-region drift' : 'quarantine cleared',
+    );
   }
 
   const unhealthy = sources.filter((s) => !s.health.healthy);
@@ -266,6 +301,10 @@ async function main(): Promise<void> {
   logger.info('Stellar Price Oracle Aggregator starting...');
   logger.info(`Polling interval: ${config.pollingIntervalMs}ms`);
   logger.info(`Watched assets: ${config.assets.join(', ')}`);
+  logger.info(
+    'Resolved configuration (redacted)',
+    redactedConfigView(config) as Record<string, unknown>,
+  );
 
   // Enforce Prometheus cardinality budget for configured sources and assets (#553)
   enforceStartupCardinalityBudget(['chainlink', 'redstone', 'band', 'reflector'], config.assets);
@@ -367,6 +406,28 @@ async function main(): Promise<void> {
     `Resolved ports: ws=${resolvedPorts.ws} health+metrics=${resolvedPorts.http} ` +
       `(PORT base ${resolvedPorts.base}; no listener on the base port)`,
   );
+
+  regionPeersConfigured.set({ region: config.region.id }, config.region.peers.length);
+  if (config.region.activeActive && config.kafka.brokers.length > 0) {
+    replicationPublisher = new KafkaReplicator(
+      {
+        regionId: config.region.id,
+        kafkaBrokers: config.kafka.brokers,
+        replicationTopic: config.region.replicationTopic,
+        consumerGroup: `${config.region.id}-replication`,
+        maxReplicationLagMs: config.region.maxReplicationLagMs,
+        sslEnabled: config.kafka.sslEnabled,
+      },
+      regionReplicator,
+    );
+    await replicationPublisher.ensureStarted();
+  } else {
+    logger.info('Cross-region replication disabled', {
+      activeActive: config.region.activeActive,
+      brokersConfigured: config.kafka.brokers.length,
+      peers: config.region.peers,
+    });
+  }
 
   if (config.soroban.contractId) {
     publisher = new ContractPublisher();

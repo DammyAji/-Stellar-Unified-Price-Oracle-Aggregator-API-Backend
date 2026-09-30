@@ -239,6 +239,7 @@ export class ContractPublisher {
   private networkPassphrase: string;
   private retryQueue: SubmissionRetryQueue;
   private feePolicy: FeePolicy;
+  private publishingEnabled = true;
 
   // Cached account for sequence bumping across transactions (Issue #578)
   private cachedAccount: Account | null = null;
@@ -287,6 +288,32 @@ export class ContractPublisher {
     });
 
     this.retryQueue.start();
+  }
+
+  isPublishingEnabled(): boolean {
+    return this.publishingEnabled;
+  }
+
+  /**
+   * Issue #580 — gate every contract write behind the region quarantine.
+   * Disabling stops the retry processor and discards the retry queue as
+   * orphaned, so nothing queued before the boundary can be flushed after the
+   * region recovers. Enabling resumes the processor; the next poll round
+   * republishes the current aggregate from scratch.
+   */
+  setPublishingEnabled(enabled: boolean, reason = 'quarantine'): void {
+    if (this.publishingEnabled === enabled) return;
+    const queued = this.retryQueue.getQueueSize();
+    this.publishingEnabled = enabled;
+    this.retryQueue.setSuspended(!enabled, reason);
+    if (enabled) {
+      logger.info('[Publisher] Contract publication resumed', { reason });
+    } else {
+      logger.warn('[Publisher] Contract publication suspended; retry queue discarded', {
+        reason,
+        orphaned: queued,
+      });
+    }
   }
 
   private recordRpcCall(callType: 'get_account' | 'simulate' | 'send' | 'get_transaction'): void {
@@ -822,6 +849,10 @@ export class ContractPublisher {
   }
 
   async publishAggregated(prices: AggregatedPrice[]): Promise<void> {
+    if (!this.publishingEnabled) {
+      logger.debug('[Publisher] Skipping contract write: publication is suspended');
+      return;
+    }
     this.resetRoundRpcMetrics();
 
     // Re-read the on-chain canary registration once per publish round
@@ -1119,6 +1150,7 @@ export class ContractPublisher {
   }
 
   processRetryQueue(): void {
+    if (!this.publishingEnabled) return;
     const items = this.retryQueue.getQueueItems();
     for (const item of items) {
       this.submitPrice(item.asset, item.price, item.decimals, item.timestamp)
@@ -1161,6 +1193,7 @@ export class ContractPublisher {
     if (items.length > 0) {
       logger.info(`[Publisher] Draining ${items.length} item(s) from retry queue before exit...`);
       for (const item of items) {
+        if (!this.publishingEnabled) break;
         try {
           const result = await this.submitPrice(item.asset, item.price, item.decimals, item.timestamp);
           if (result) {

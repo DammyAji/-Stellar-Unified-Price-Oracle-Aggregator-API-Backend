@@ -1,75 +1,69 @@
 import dotenv from 'dotenv';
 import path from 'path';
-import { URL } from 'url';
 import { decryptSecret } from './crypto';
+import { parseConfigEnv, redactConfig } from './config-schema';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const sourceUrls = {
-  chainlink: process.env.CHAINLINK_BASE_URL || 'https://min-api.cryptocompare.com/data',
-  redstone: process.env.REDSTONE_BASE_URL || 'https://api.redstone.finance',
-  band: process.env.BAND_BASE_URL || 'https://laozi1.bandchain.org/api',
-  reflector: process.env.REFLECTOR_BASE_URL || 'https://api.reflector.xyz',
-};
-
-/** Hostnames extracted from the configured source URLs — the implicit allowlist. */
-function deriveSourceHosts(): string[] {
+function deriveSourceHosts(urls: string[]): string[] {
   const hosts = new Set<string>();
-  for (const url of Object.values(sourceUrls)) {
-    try {
-      hosts.add(new URL(url).hostname.toLowerCase());
-    } catch {
-      /* ignore malformed source URLs */
-    }
+  for (const url of urls) {
+    hosts.add(new URL(url).hostname.toLowerCase());
   }
   return Array.from(hosts);
 }
 
-function commaList(value: string | undefined): string[] {
-  return (value || '')
-    .split(',')
-    .map((v) => v.trim())
-    .filter(Boolean);
-}
+export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
+  const parsed = parseConfigEnv(env);
 
-export const config = {
-  port: parseInt(process.env.PORT || '4000', 10),
-  pollingIntervalMs: parseInt(process.env.POLLING_INTERVAL_MS || '30000', 10),
-  stalenessThresholdMs: parseInt(process.env.STALENESS_THRESHOLD_MS || '120000', 10),
+  const regionId = parsed.REGION_ID ?? parsed.AWS_REGION?.trim() ?? 'local';
+  const sourceUrls = [
+    parsed.CHAINLINK_BASE_URL,
+    parsed.REDSTONE_BASE_URL,
+    parsed.BAND_BASE_URL,
+    parsed.REFLECTOR_BASE_URL,
+  ];
 
-  soroban: {
-    rpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
-    contractId: process.env.CONTRACT_ID || '',
-    networkPassphrase: process.env.NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
-    // Sensitive: decrypted at rest if stored as an `enc:` payload (issue #41).
-    adminSecret: decryptSecret(process.env.ADMIN_SECRET_KEY || ''),
-  },
+  return {
+    port: parsed.PORT,
+    pollingIntervalMs: parsed.POLLING_INTERVAL_MS,
+    stalenessThresholdMs: parsed.STALENESS_THRESHOLD_MS,
 
-  // Issue #105 — canary deployments for contract upgrades.  Traffic routing
-  // itself is driven by the on-chain `get_canary` registration (traffic share
-  // in basis points); these knobs only control the local failure handling.
-  canary: {
-    // Consecutive canary submission failures before the publisher triggers a
-    // rollback (zeroes the canary traffic share on-chain).
-    failureThreshold: parseInt(process.env.CANARY_FAILURE_THRESHOLD || '3', 10),
-    // Set to "false" to disable the on-chain auto-rollback write; failures
-    // are then only logged/metric-alerted and must be rolled back manually.
-    autoRollback: process.env.CANARY_AUTO_ROLLBACK !== 'false',
-  },
-
-  sources: {
-    chainlink: {
-      baseUrl: sourceUrls.chainlink,
-      apiKey: decryptSecret(process.env.CHAINLINK_API_KEY || ''),
+    soroban: {
+      rpcUrl: parsed.SOROBAN_RPC_URL,
+      contractId: parsed.CONTRACT_ID,
+      networkPassphrase: parsed.NETWORK_PASSPHRASE,
+      adminSecret: decryptSecret(parsed.ADMIN_SECRET_KEY),
     },
-    redstone: {
-      baseUrl: sourceUrls.redstone,
+
+    canary: {
+      failureThreshold: parsed.CANARY_FAILURE_THRESHOLD,
+      autoRollback: parsed.CANARY_AUTO_ROLLBACK,
     },
-    band: {
-      baseUrl: sourceUrls.band,
+
+    sources: {
+      chainlink: {
+        baseUrl: parsed.CHAINLINK_BASE_URL,
+        apiKey: decryptSecret(parsed.CHAINLINK_API_KEY),
+      },
+      redstone: { baseUrl: parsed.REDSTONE_BASE_URL },
+      band: { baseUrl: parsed.BAND_BASE_URL },
+      reflector: { baseUrl: parsed.REFLECTOR_BASE_URL },
     },
-    reflector: {
-      baseUrl: sourceUrls.reflector,
+
+    assets: parsed.WATCHED_ASSETS,
+
+    logLevel: parsed.LOG_LEVEL,
+
+    region: {
+      id: regionId,
+      activeActive: parsed.ACTIVE_ACTIVE_REGIONS_ENABLED,
+      peers: parsed.REGION_PEERS.map((peer) => peer.toLowerCase()),
+      replicationTopic: parsed.REGION_REPLICATION_TOPIC,
+      driftAlertPercent: parsed.REGION_DRIFT_ALERT_PERCENT,
+      quarantineEnabled: parsed.REGION_QUARANTINE_ENABLED,
+      quarantineRecoverPercent: parsed.REGION_QUARANTINE_RECOVER_PERCENT,
+      maxReplicationLagMs: parsed.REGION_MAX_REPLICATION_LAG_MS,
     },
   },
 
@@ -118,16 +112,12 @@ export const config = {
       coldStorageDir: process.env.FILE_COLD_STORAGE_DIR || './data/archive',
       intervalMs: parseInt(process.env.FILE_ARCHIVAL_INTERVAL_MS || '86400000', 10),
     },
-  },
 
-  security: {
-    // SSRF protection for outbound oracle-source HTTP requests (issue #39).
-    ssrf: {
-      enabled: process.env.SSRF_PROTECTION_ENABLED !== 'false',
-      // Configured source hosts plus any explicitly allowlisted extras.
-      allowedHosts: [...deriveSourceHosts(), ...commaList(process.env.ORACLE_ALLOWED_HOSTS)],
-      allowPrivateIps: process.env.SSRF_ALLOW_PRIVATE_IPS === 'true',
-      requestTimeoutMs: parseInt(process.env.OUTBOUND_REQUEST_TIMEOUT_MS || '10000', 10),
+    database: {
+      url: decryptSecret(parsed.DATABASE_URL),
+      useTimescale: parsed.USE_TIMESCALEDB,
+      chunkIntervalSeconds: parsed.TIMESCALE_CHUNK_INTERVAL_SECONDS,
+      retentionDays: parsed.HISTORY_RETENTION_DAYS,
     },
     // WebSocket upgrade hardening (issue #40, #586).
     websocket: {
@@ -136,11 +126,66 @@ export const config = {
       maxConnectionsPerWindow: parseInt(process.env.WS_RATE_LIMIT_MAX || '20', 10),
       rateLimitWindowMs: parseInt(process.env.WS_RATE_LIMIT_WINDOW_MS || '60000', 10),
     },
-    // Encryption at rest for sensitive config + historical data (issue #41).
-    encryption: {
-      key: process.env.ENCRYPTION_KEY || '',
-      previousKey: process.env.ENCRYPTION_KEY_PREVIOUS || '',
-      encryptHistory: process.env.ENCRYPT_HISTORY === 'true',
+
+    security: {
+      ssrf: {
+        enabled: parsed.SSRF_PROTECTION_ENABLED,
+        allowedHosts: [...deriveSourceHosts(sourceUrls), ...parsed.ORACLE_ALLOWED_HOSTS],
+        allowPrivateIps: parsed.SSRF_ALLOW_PRIVATE_IPS,
+        requestTimeoutMs: parsed.OUTBOUND_REQUEST_TIMEOUT_MS,
+      },
+      websocket: {
+        allowedOrigins: parsed.WS_ALLOWED_ORIGINS,
+        requireOrigin: parsed.WS_REQUIRE_ORIGIN,
+        maxConnectionsPerWindow: parsed.WS_RATE_LIMIT_MAX,
+        rateLimitWindowMs: parsed.WS_RATE_LIMIT_WINDOW_MS,
+      },
+      encryption: {
+        key: parsed.ENCRYPTION_KEY,
+        previousKey: parsed.ENCRYPTION_KEY_PREVIOUS,
+        encryptHistory: parsed.ENCRYPT_HISTORY,
+      },
     },
-  },
-};
+
+    websocket: {
+      maxSubscriptions: parsed.WS_MAX_SUBSCRIPTIONS,
+      dropBufferBytes: parsed.WS_BACKPRESSURE_DROP_BYTES,
+      pingIntervalMs: parsed.WS_PING_INTERVAL_MS,
+      pingTimeoutMs: parsed.WS_PING_TIMEOUT_MS,
+      maxClientMessageBytes: parsed.WS_MAX_CLIENT_MESSAGE_BYTES,
+    },
+  };
+}
+
+export type AggregatorConfig = ReturnType<typeof loadConfig>;
+
+export function redactedConfigView(value: AggregatorConfig): unknown {
+  return redactConfig(value);
+}
+
+function isCheckConfigRequest(): boolean {
+  return process.argv.includes('--check-config');
+}
+
+function failFast(error: unknown): never {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+
+function isTestRunner(): boolean {
+  return process.env.VITEST === 'true' || process.env.NODE_ENV === 'test';
+}
+
+export const config: AggregatorConfig = (() => {
+  try {
+    const resolved = loadConfig(process.env);
+    if (isCheckConfigRequest()) {
+      console.log(JSON.stringify(redactedConfigView(resolved), null, 2));
+      process.exit(0);
+    }
+    return resolved;
+  } catch (error) {
+    if (!isTestRunner()) failFast(error);
+    throw error;
+  }
+})();
