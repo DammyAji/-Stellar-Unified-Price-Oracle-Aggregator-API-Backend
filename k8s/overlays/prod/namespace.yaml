@@ -8,3 +8,7 @@ metadata:
     cost.stellar.org/environment: production
     cost.stellar.org/team: platform
     cost.stellar.org/cost-center: stellar-oracle
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.29
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

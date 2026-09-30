@@ -39,7 +39,9 @@ standard Prometheus + Grafana + Alertmanager toolchain:
   price staleness and API cost/budget utilization. Metrics are registered in the
   aggregator's `metrics.ts`.
 - **Alert rules** are declared as Kubernetes `PrometheusRule` objects in
-  `k8s/base/prometheus-rule.yaml` (see [§5](#5-alert-rules-and-thresholds)).
+  `k8s/base/prometheus-rule.yaml` (see [§5](#5-alert-rules-and-thresholds));
+  the aggregator scrape target is `k8s/base/aggregator/service-monitor.yaml`
+  (Service port `http-metrics` = 4002).
 - **Dashboards** are stored in `monitoring/grafana-dashboard.json` (see [§6](#6-grafana-dashboards)).
 - **Alert routing** is configured in
   `k8s/chaos/reporting/alertmanager-config.yaml`.
@@ -58,7 +60,7 @@ The API and aggregator must expose their `/metrics` endpoints on scrape
 targets; point the Prometheus `scrape_configs` at:
 
 - `http://localhost:3000/metrics` (API)
-- `http://localhost:<aggregator-port>/metrics` (Aggregator)
+- `http://localhost:4002/metrics` (Aggregator)
 
 The `/metrics` endpoint is **unauthenticated by default** so Prometheus can
 scrape it; do not expose the monitoring endpoints publicly in production (see
@@ -186,6 +188,8 @@ current set and recommended thresholds:
 | `CircuitBreakerOpen` | `circuit_breaker_active == 1` | 1m | **warning** | `docs/runbooks/oracle-source-down.md` |
 | `DbReplicaLagHigh` | `db_replica_lag_seconds > 2` | 5m | **warning** | `docs/runbooks/database-issues.md` |
 | `PrometheusBudgetBurnRateHigh` | burn-rate `> 14.4` over 1h | — | **critical** | [§4.2](#42-error-budget-alerting) |
+| `AggregatorMetricsTargetDown` | `up{job=~".*aggregator.*"} == 0` | 5m | **critical** | `docs/runbooks/aggregator-metrics-missing.md` |
+| `AggregatorMetricsAbsent` | `absent(up{job=~".*aggregator.*"})` | 10m | **critical** | `docs/runbooks/aggregator-metrics-missing.md` |
 
 ### 5.1 Threshold tuning
 
@@ -240,7 +244,13 @@ current set and recommended thresholds:
 ## 9. Checklist for enabling alerting on a new environment
 
 1. Configure Prometheus scrape targets for the API and aggregator `/metrics`.
+   For the aggregator, apply `k8s/base/aggregator/service-monitor.yaml` — it
+   scrapes Service port `http-metrics` (4002, the health + `/metrics` listener;
+   see issue #590).
 2. Apply `k8s/base/prometheus-rule.yaml` (and environment-specific overrides).
+   It includes the no-data alerts `AggregatorMetricsTargetDown` and
+   `AggregatorMetricsAbsent`, so a wrong scrape target pages instead of
+   staying silent.
 3. Import `monitoring/grafana-dashboard.json` and point it at the right data source.
 4. Set Alertmanager receivers in `k8s/chaos/reporting/alertmanager-config.yaml`.
 5. Confirm SLO compatibility via `scripts/generate-slo-report.ts`.

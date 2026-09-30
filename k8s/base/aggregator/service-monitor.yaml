@@ -1,0 +1,27 @@
+# Issue #590 — scrape the aggregator's Prometheus endpoint.
+#
+# The aggregator serves /health and /metrics on ONE HTTP listener (PORT + 2 =
+# 4002); nothing listens on PORT (4000) itself. The `http-metrics` port on the
+# aggregator Service (k8s/base/aggregator/service.yaml) targets that listener.
+#
+# Applied manually alongside k8s/base/prometheus-rule.yaml (both need the
+# Prometheus Operator CRDs, see k8s/istio/README.md). Omitted from
+# k8s/base/kustomization.yaml so clusters without the operator can still
+# `kustomize build`/apply the base overlays. metadata.namespace is left unset
+# so it installs into whatever namespace the aggregator Service lives in.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: aggregator
+  labels:
+    app: aggregator
+    release: prometheus
+spec:
+  jobLabel: app
+  selector:
+    matchLabels:
+      app: aggregator
+  endpoints:
+    - port: http-metrics
+      path: /metrics
+      interval: 30s

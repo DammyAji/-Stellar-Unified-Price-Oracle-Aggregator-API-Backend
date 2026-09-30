@@ -8,12 +8,11 @@ spec:
   selector:
     app: aggregator
   ports:
-    - name: http-metrics
-      port: 4000
-      targetPort: http-metrics
+    # The process binds only PORT + 1 (WS) and PORT + 2 (health + /metrics
+    # on one HTTP listener); nothing ever listens on PORT itself (issue #590).
     - name: ws-internal
       port: 4001
       targetPort: ws-internal
-    - name: http-health
+    - name: http-metrics
       port: 4002
       targetPort: http-health

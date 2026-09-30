@@ -310,6 +310,8 @@ async function main(): Promise<void> {
     logger.info('DATABASE_URL not configured, using file-based storage');
   }
 
+  const resolvedPorts = { base: config.port, ws: config.port + 1, http: config.port + 2 };
+
   const wss = new WebSocketServer(config.port);
   wss.start();
 
@@ -347,8 +349,13 @@ async function main(): Promise<void> {
     uptime: process.uptime(),
     startupTimeMs,
     onChainHeartbeat,
+    ports: resolvedPorts,
   }));
   healthServer.start();
+  logger.info(
+    `Resolved ports: ws=${resolvedPorts.ws} health+metrics=${resolvedPorts.http} ` +
+      `(PORT base ${resolvedPorts.base}; no listener on the base port)`,
+  );
 
   if (config.soroban.contractId) {
     publisher = new ContractPublisher();

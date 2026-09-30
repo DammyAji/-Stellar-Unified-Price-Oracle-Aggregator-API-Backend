@@ -33,22 +33,62 @@ describe('Kubernetes Health Probes Configuration', () => {
     vi.clearAllMocks();
   });
 
+  describe('Startup Probe Configuration', () => {
+    it('should define startupProbe pointing to /health/live', () => {
+      deploymentConfig.spec.template.spec.containers[0].startupProbe = {
+        httpGet: {
+          path: '/health/live',
+          port: 4002,
+        },
+        initialDelaySeconds: 0,
+        periodSeconds: 5,
+        timeoutSeconds: 2,
+        failureThreshold: 30,
+      };
+
+      const probe = deploymentConfig.spec.template.spec.containers[0].startupProbe;
+      expect(probe.httpGet.path).toBe('/health/live');
+      expect(probe.httpGet.port).toBe(4002);
+    });
+
+    it('should have initialDelaySeconds of 0 for immediate startup checks', () => {
+      const probe = {
+        httpGet: { path: '/health/live', port: 4002 },
+        initialDelaySeconds: 0,
+      };
+
+      expect(probe.initialDelaySeconds).toBe(0);
+    });
+
+    it('should have failureThreshold of 30 for ~150s max startup time', () => {
+      const probe = {
+        httpGet: { path: '/health/live', port: 4002 },
+        periodSeconds: 5,
+        failureThreshold: 30,
+      };
+
+      const maxStartupTimeMs = probe.periodSeconds * probe.failureThreshold * 1000;
+      expect(maxStartupTimeMs).toBe(150000); // 150 seconds
+      expect(probe.failureThreshold).toBe(30);
+    });
+  });
+
   describe('Liveness Probe Configuration', () => {
     it('should define liveness probe pointing to /health/live', () => {
       deploymentConfig.spec.template.spec.containers[0].livenessProbe = {
         httpGet: {
           path: '/health/live',
-          port: 8080,
+          port: 4002,
         },
-        initialDelaySeconds: 10,
+        initialDelaySeconds: 30,
         periodSeconds: 10,
-        timeoutSeconds: 5,
-        failureThreshold: 3,
+        timeoutSeconds: 2,
+        failureThreshold: 5,
       };
 
       const probe = deploymentConfig.spec.template.spec.containers[0].livenessProbe;
       expect(probe.httpGet.path).toBe('/health/live');
-      expect(probe.httpGet.port).toBe(8080);
+      expect(probe.httpGet.port).toBe(4002);
     });
 
     it('should have appropriate initialDelaySeconds', () => {
@@ -108,22 +148,22 @@ describe('Kubernetes Health Probes Configuration', () => {
       deploymentConfig.spec.template.spec.containers[0].readinessProbe = {
         httpGet: {
           path: '/health/ready',
-          port: 8080,
+          port: 4002,
         },
-        initialDelaySeconds: 5,
+        initialDelaySeconds: 10,
         periodSeconds: 5,
-        timeoutSeconds: 3,
-        failureThreshold: 2,
+        timeoutSeconds: 2,
+        failureThreshold: 3,
       };
 
       const probe = deploymentConfig.spec.template.spec.containers[0].readinessProbe;
       expect(probe.httpGet.path).toBe('/health/ready');
-      expect(probe.httpGet.port).toBe(8080);
+      expect(probe.httpGet.port).toBe(4002);
     });
 
     it('should have shorter initialDelaySeconds than liveness', () => {
-      const livenessDelay = 10;
-      const readinessDelay = 5;
+      const livenessDelay = 30;
+      const readinessDelay = 10;
 
       expect(readinessDelay).toBeLessThan(livenessDelay);
     });
@@ -136,8 +176,8 @@ describe('Kubernetes Health Probes Configuration', () => {
     });
 
     it('should have lower failureThreshold than liveness', () => {
-      const livenessThreshold = 3;
-      const readinessThreshold = 2;
+      const livenessThreshold = 5;
+      const readinessThreshold = 3;
 
       expect(readinessThreshold).toBeLessThan(livenessThreshold);
     });
@@ -264,7 +304,7 @@ describe('Kubernetes Health Probes Configuration', () => {
   });
 
   describe('Deployment with Probes', () => {
-    it('should render complete deployment yaml with probes', () => {
+    it('should render complete deployment yaml with all probes', () => {
       const config = {
         spec: {
           template: {
@@ -272,17 +312,23 @@ describe('Kubernetes Health Probes Configuration', () => {
               containers: [
                 {
                   name: 'aggregator',
+                  startupProbe: {
+                    httpGet: { path: '/health/live', port: 4002 },
+                    initialDelaySeconds: 0,
+                    periodSeconds: 5,
+                    failureThreshold: 30,
+                  },
                   livenessProbe: {
-                    httpGet: { path: '/health/live', port: 8080 },
-                    initialDelaySeconds: 10,
+                    httpGet: { path: '/health/live', port: 4002 },
+                    initialDelaySeconds: 30,
                     periodSeconds: 10,
-                    failureThreshold: 3,
+                    failureThreshold: 5,
                   },
                   readinessProbe: {
-                    httpGet: { path: '/health/ready', port: 8080 },
-                    initialDelaySeconds: 5,
+                    httpGet: { path: '/health/ready', port: 4002 },
+                    initialDelaySeconds: 10,
                     periodSeconds: 5,
-                    failureThreshold: 2,
+                    failureThreshold: 3,
                   },
                 },
               ],
@@ -291,6 +337,7 @@ describe('Kubernetes Health Probes Configuration', () => {
         },
       };
 
+      expect(config.spec.template.spec.containers[0].startupProbe).toBeDefined();
       expect(config.spec.template.spec.containers[0].livenessProbe).toBeDefined();
       expect(config.spec.template.spec.containers[0].readinessProbe).toBeDefined();
     });

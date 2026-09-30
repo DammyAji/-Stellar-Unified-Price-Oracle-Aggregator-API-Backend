@@ -17,32 +17,84 @@ spec:
         app: api
         version: stable
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: api
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: api
       containers:
         - name: api
           image: oracle-api:placeholder
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - name: http
               containerPort: 3000
             - name: ws
               containerPort: 3001
+          env:
+            - name: CORS_PERSIST_PATH
+              value: /tmp/cors-origins.json
           envFrom:
             - configMapRef:
                 name: stellar-oracle-config
             - secretRef:
                 name: stellar-oracle-secrets
+          startupProbe:
+            httpGet:
+              path: /api/v1/health/live
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
           readinessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /api/v1/health/ready
               port: http
             initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /api/v1/health
+              path: /api/v1/health/live
               port: http
             initialDelaySeconds: 30
-            periodSeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 5
           resources:
             requests:
               cpu: 100m
@@ -50,3 +102,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
