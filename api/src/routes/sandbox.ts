@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { config } from '../infrastructure/config';
 import { HybridCache } from '../price-serving/cache';
 import { readAssetPrices, readPriceHistory, resetSandboxData, SANDBOX_ASSETS } from '../price-serving/price-store';
+import { sendError } from '../infrastructure/error';
 
 const router = Router();
 let sandboxCache: HybridCache<unknown> | undefined;
@@ -50,7 +51,11 @@ router.post('/replay', async (req: Request, res: Response) => {
     return res.json({ replayed: true, method: 'GET', path, response: parts[1] ? prices.find((price) => price.asset === parts[1]) || null : prices });
   }
   if (parts[0] === 'history') {
-    return res.json({ replayed: true, method: 'GET', path, response: await readPriceHistory(parts[1]) });
+    try {
+      return res.json({ replayed: true, method: 'GET', path, response: await readPriceHistory(parts[1]) });
+    } catch (err) {
+      return sendError(res, err, { path: req.path, method: req.method, requestId: req.requestId });
+    }
   }
   return res.json({ replayed: true, method: 'GET', path, response: { environment: 'sandbox', status: 'ok' } });
 });

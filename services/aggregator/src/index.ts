@@ -113,7 +113,14 @@ async function poll(): Promise<AggregatedPrice[]> {
           price.timestamp,
         );
       } else {
-        appendHistoricalPrice(price.asset, price.price.toString(), price.decimals, price.source, price.timestamp);
+        try {
+          appendHistoricalPrice(price.asset, price.price.toString(), price.decimals, price.source, price.timestamp);
+        } catch (err) {
+          logger.error('Failed to append historical price for asset', {
+            asset: price.asset,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
 
@@ -314,6 +321,8 @@ async function main(): Promise<void> {
     logger.info('DATABASE_URL not configured, using file-based storage');
   }
 
+  const resolvedPorts = { base: config.port, ws: config.port + 1, http: config.port + 2 };
+
   const wss = new WebSocketServer(config.port);
   wss.start();
 
@@ -351,9 +360,13 @@ async function main(): Promise<void> {
     uptime: process.uptime(),
     startupTimeMs,
     onChainHeartbeat,
-    shutdownInProgress,
+    ports: resolvedPorts,
   }));
   healthServer.start();
+  logger.info(
+    `Resolved ports: ws=${resolvedPorts.ws} health+metrics=${resolvedPorts.http} ` +
+      `(PORT base ${resolvedPorts.base}; no listener on the base port)`,
+  );
 
   if (config.soroban.contractId) {
     publisher = new ContractPublisher();

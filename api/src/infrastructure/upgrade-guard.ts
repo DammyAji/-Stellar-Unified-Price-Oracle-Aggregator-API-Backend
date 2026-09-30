@@ -2,13 +2,7 @@ import { logger } from '../observability/logger';
 import { config } from './config';
 import { verifyWsCsrfToken, isCsrfEnabled } from './csrf';
 import { verifyWsSignature } from '../governance/ws-signing';
-import {
-  WsGuardCore,
-  type VerifyClientCallback,
-  type VerifyClientInfo,
-  type WsGuardConfig,
-} from '@stellar-oracle/ws-guard';
-import { wsUpgradeRejectionsTotal } from '../observability/metrics';
+import { clientIp as trustedClientIp } from '../platform/trusted-proxy';
 
 /**
  * Validates WebSocket upgrade requests before a connection is accepted
@@ -122,16 +116,8 @@ export class WsUpgradeGuard {
     return this.core.getConnectionCount(ip) < config.ws.maxConcurrentConnectionsPerIp;
   }
 
-  private deny(
-    ip: string,
-    origin: string | undefined,
-    reason: string,
-    code: number,
-    message: string,
-  ): void {
-    this.core.reject({ reason, code, message, clientIp: ip, origin });
-    wsUpgradeRejectionsTotal.inc({ service: SERVICE_LABEL, reason });
-    logger.warn('WS upgrade rejected', { ip, origin: origin || '(none)', reason });
+  private clientIp(req: IncomingMessage): string {
+    return trustedClientIp(req);
   }
 
   private queryParam(req: import('http').IncomingMessage, key: string): string | undefined {

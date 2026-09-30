@@ -62,14 +62,13 @@ spec:
         - protocol: TCP
           port: 3000
   egress:
-    # Internal: aggregator service
+    # Internal: aggregator service (WS on 4001, health+metrics on 4002;
+    # nothing listens on 4000)
     - to:
         - podSelector:
             matchLabels:
               app: aggregator
       ports:
-        - protocol: TCP
-          port: 4000
         - protocol: TCP
           port: 4001
         - protocol: TCP
@@ -141,8 +140,6 @@ spec:
         - podSelector: {}
       ports:
         - protocol: TCP
-          port: 4000
-        - protocol: TCP
           port: 4001
         - protocol: TCP
           port: 4002
@@ -152,7 +149,7 @@ spec:
               kubernetes.io/metadata.name: monitoring
       ports:
         - protocol: TCP
-          port: 4000
+          port: 4002
   egress:
     # Internal: TimescaleDB
     - to:

@@ -205,7 +205,7 @@ All metrics exported by services:
 - `db_pool_*` — Database connection pool
 - `circuit_breaker_triggered_total` — Circuit breaker trips
 
-### Aggregator Service (`/metrics` on port 4000)
+### Aggregator Service (`/metrics` on port 4002)
 - `oracle_source_*` — Source latency, requests, uptime
 - `onchain_price_staleness_seconds` — On-chain staleness per asset
 - `ws_connections_*` — WebSocket connection metrics

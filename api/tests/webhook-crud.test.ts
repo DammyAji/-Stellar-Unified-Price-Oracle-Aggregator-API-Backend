@@ -1,10 +1,15 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import path from 'node:path';
+import { describe, it, expect, beforeEach, beforeAll, vi, afterEach } from 'vitest';
 import { webhookService, WebhookRegistration, WebhookTrigger } from '../src/webhooks/webhook-service';
 
 describe('Webhooks: CRUD Management and Delivery System', () => {
-  beforeEach(() => {
+  beforeAll(() => {
+    process.env.WEBHOOK_DATA_DIR = path.resolve(__dirname, '../data/webhooks-test/crud');
+  });
+
+  beforeEach(async () => {
     vi.clearAllMocks();
-    webhookService.reset();
+    await webhookService.reset();
   });
 
   describe('POST /webhooks - Register webhook', () => {
@@ -159,7 +164,7 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
 
       await webhookService.deliver(webhook, { asset: 'XLM', price: 0.5, timestamp: 1234567890 });
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries.length).toBeGreaterThan(0);
       expect(deliveries[0].success).toBe(true);
       expect(deliveries[0].statusCode).toBe(200);
@@ -180,7 +185,7 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
 
       await webhookService.deliver(webhook, { asset: 'XLM', price: 0.5, timestamp: 1234567890 });
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -194,7 +199,7 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
 
       await webhookService.deliver(webhook, { asset: 'XLM', price: 0.5, timestamp: 1234567890 });
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries[0]).toHaveProperty('attempt');
       expect(deliveries[0]).toHaveProperty('success');
       expect(deliveries[0]).toHaveProperty('timestamp');
@@ -212,16 +217,16 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
 
       await webhookService.deliver(webhook, { asset: 'XLM', price: 0.5, timestamp: 1234567890 });
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries.length).toBeGreaterThan(0);
       expect(deliveries[0].webhookId).toBe(webhook.id);
     });
 
-    it('should return empty array when no deliveries exist', () => {
+    it('should return empty array when no deliveries exist', async () => {
       const trigger: WebhookTrigger = { type: 'threshold', asset: 'XLM', value: 5 };
       const webhook = webhookService.register('https://webhook.example.com', 'test-key', trigger);
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries).toEqual([]);
     });
 
@@ -236,7 +241,7 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
 
       await webhookService.deliver(webhook, { asset: 'XLM', price: 0.5, timestamp: 1234567890 });
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       const failedDelivery = deliveries.find((d) => d.error);
       expect(failedDelivery).toBeDefined();
       expect(failedDelivery?.error).toBeDefined();
@@ -254,8 +259,9 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
 
       await webhookService.handlePriceUpdate('XLM', 0.5);
       await webhookService.handlePriceUpdate('XLM', 0.53);
+      await webhookService.drain();
 
-      const deliveries = webhookService.deliveries();
+      const deliveries = await webhookService.deliveries();
       expect(deliveries.length).toBeGreaterThan(0);
     });
 
@@ -268,8 +274,9 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
       ));
 
       await webhookService.handlePriceUpdate('XLM', 0.5);
+      await webhookService.drain();
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries.length).toBeGreaterThan(0);
     });
 
@@ -283,7 +290,7 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
       await webhookService.handlePriceUpdate('XLM', 0.5);
       await webhookService.handlePriceUpdate('XLM', 0.53);
 
-      const deliveries = webhookService.deliveries(webhook.id);
+      const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries).toEqual([]);
     });
   });

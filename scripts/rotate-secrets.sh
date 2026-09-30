@@ -39,6 +39,7 @@ rotate_encryption_key() {
 
 rotate_api_keys() {
   log "Rotating admin/API keys via the admin API (requires ADMIN_API_URL, ADMIN_API_KEY, TARGET_KEY_HASH)"
+  log "The API persists the rotation to the key store before responding (issue #609): the old key is rejected immediately, the new key is returned once, and both survive restart"
   run "curl -sf -X POST \"\${ADMIN_API_URL:?}/admin/keys/\${TARGET_KEY_HASH:?}/rotate\" -H \"Authorization: Bearer \${ADMIN_API_KEY:?}\""
 }
 

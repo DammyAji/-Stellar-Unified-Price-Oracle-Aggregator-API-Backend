@@ -13,30 +13,24 @@ import * as path from 'path';
 
 vi.mock('fs', () => {
   const mockFiles = new Map<string, string>();
-  const existsSync = vi.fn((p: string) => mockFiles.has(p));
-  const writeFileSync = vi.fn((p: string, data: string) => { mockFiles.set(p as string, data); });
-  const readFileSync = vi.fn((p: string) => mockFiles.get(p) || '[]');
-  // Atomic writes (issue #579) rename the temp file onto the target path, so
-  // the mock's rename moves the temp entry instead of leaving it behind.
-  const renameSync = vi.fn((oldPath: string, newPath: string) => {
-    if (!mockFiles.has(oldPath)) throw new Error(`ENOENT: ${oldPath}`);
-    mockFiles.set(newPath, mockFiles.get(oldPath)!);
-    mockFiles.delete(oldPath);
+  const renameSync = vi.fn((from: string, to: string) => {
+    const contents = mockFiles.get(from);
+    mockFiles.delete(from);
+    mockFiles.set(to, contents as string);
   });
-  return {
-    default: {
-      existsSync,
-      mkdirSync: vi.fn(),
-      writeFileSync,
-      readFileSync,
-      renameSync,
-    },
-    existsSync,
+  const api = {
+    existsSync: vi.fn((p: string) => mockFiles.has(p)),
     mkdirSync: vi.fn(),
-    writeFileSync,
-    readFileSync,
+    writeFileSync: vi.fn((p: string, data: string) => { mockFiles.set(p, data); }),
+    readFileSync: vi.fn((p: string) => mockFiles.get(p) || '[]'),
     renameSync,
+    unlinkSync: vi.fn((p: string) => { mockFiles.delete(p); }),
+    readdirSync: vi.fn(() => []),
+    openSync: vi.fn(() => { throw new Error('openSync is not supported by the fs mock'); }),
+    fsyncSync: vi.fn(),
+    closeSync: vi.fn(),
   };
+  return { ...api, default: api };
 });
 
 vi.mock('../src/infrastructure/http-client', () => ({

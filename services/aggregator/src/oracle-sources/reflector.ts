@@ -2,7 +2,17 @@ import { httpClient } from '../infrastructure/http-client';
 import { config } from '../infrastructure/config';
 import { NormalizedPrice, OracleSourceName } from '../infrastructure/types';
 import { BaseSource } from './base';
-import { parseProviderResponse, reportInvalidPayload, type ProviderSchemaName } from './response-validation';
+import { resolveDecimals } from './decimals';
+
+interface ReflectorPriceData {
+  price: string | number;
+  decimals?: number;
+  timestamp?: number;
+}
+
+interface ReflectorPricesResponse {
+  prices?: Record<string, ReflectorPriceData | undefined>;
+}
 
 export class ReflectorSource extends BaseSource {
   name: OracleSourceName = 'reflector';
@@ -29,6 +39,11 @@ export class ReflectorSource extends BaseSource {
       return null;
     }
 
-    return this.normalizeValidated(asset, result);
+    return this.normalize(
+      asset,
+      data.price,
+      resolveDecimals(this.name, data.decimals),
+      data.timestamp ?? null,
+    );
   }
 }

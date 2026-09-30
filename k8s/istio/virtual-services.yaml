@@ -94,4 +94,4 @@ spec:
             host: aggregator.stellar-oracle.svc.cluster.local
             subset: stable
             port:
-              number: 4000
+              number: 4002

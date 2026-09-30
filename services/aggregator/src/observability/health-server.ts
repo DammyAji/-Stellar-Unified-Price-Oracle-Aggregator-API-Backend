@@ -25,10 +25,8 @@ export interface HealthSnapshot {
   circuitBreakerStates?: Record<string, SourceCBStatus>;
   // Issue #382 — seconds since last on-chain update, per asset.
   onChainHeartbeat?: Record<string, number>;
-  // Issue #579 — externally-settable readiness override. During graceful
-  // shutdown the flag is flipped before anything else stops, so the
-  // orchestrator drains this pod while it can still serve.
-  shutdownInProgress?: boolean;
+  // Issue #590 — resolved listen ports (PORT base, PORT+1 WS, PORT+2 HTTP).
+  ports?: { base: number; ws: number; http: number };
 }
 
 export class HealthServer {
@@ -166,6 +164,8 @@ export class HealthServer {
           budgetStatuses: getBudgetStatuses(),
           // #382 — on-chain price staleness heartbeat, per asset
           onChainHeartbeat: snap.onChainHeartbeat || {},
+          // #590 — resolved listen ports, so drift is visible at runtime
+          ...(snap.ports ? { ports: snap.ports } : {}),
         };
 
         if (verbose) {

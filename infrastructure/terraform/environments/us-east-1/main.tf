@@ -1,17 +1,18 @@
 # ── Backend ───────────────────────────────────────────────────────────────────
-# Uncomment and populate to use remote state for this environment:
-#
-# terraform {
-#   backend "s3" {
-#     bucket         = "stellar-oracle-terraform-state"
-#     key            = "us-east-1/terraform.tfstate"
-#     region         = "us-east-1"
-#     dynamodb_table = "terraform-state-lock"
-#     encrypt        = true
-#   }
-# }
+# Remote state is required for this environment. The S3 bucket and DynamoDB
+# lock table must exist before `terraform init` (chicken-and-egg). Bootstrap
+# them once with the commands in infrastructure/terraform/bootstrap/README.md,
+# then run `terraform init` here. State is versioned and encrypted at rest.
 
 terraform {
+  backend "s3" {
+    bucket         = "stellar-oracle-terraform-state"
+    key            = "us-east-1/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-state-lock"
+    encrypt        = true
+  }
+
   required_version = ">= 1.5.0"
 
   required_providers {

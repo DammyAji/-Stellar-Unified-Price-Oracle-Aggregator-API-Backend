@@ -1,17 +1,31 @@
 # ── Backend ───────────────────────────────────────────────────────────────────
-# Uncomment and populate to use remote state for this environment:
+# Remote state is required for this environment. The S3 bucket and DynamoDB
+# lock table must exist before `terraform init` (chicken-and-egg). Bootstrap
+# them once with the commands in infrastructure/terraform/bootstrap/README.md:
 #
-# terraform {
-#   backend "s3" {
-#     bucket         = "stellar-oracle-terraform-state"
-#     key            = "eu-west-1/terraform.tfstate"
-#     region         = "us-east-1"
-#     dynamodb_table = "terraform-state-lock"
-#     encrypt        = true
-#   }
-# }
+#   aws s3api create-bucket --bucket stellar-oracle-terraform-state \
+#     --region us-east-1
+#   aws s3api put-bucket-versioning --bucket stellar-oracle-terraform-state \
+#     --versioning-configuration Status=Enabled
+#   aws s3api put-bucket-encryption --bucket stellar-oracle-terraform-state \
+#     --server-side-encryption-configuration \
+#     '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+#   aws dynamodb create-table --table-name terraform-state-lock \
+#     --attribute-definitions AttributeName=LockID,AttributeType=S \
+#     --key-schema AttributeName=LockID,KeyType=HASH \
+#     --billing-mode PAY_PER_REQUEST --region us-east-1
+#
+# Then run `terraform init` from this directory. Local state is not supported.
 
 terraform {
+  backend "s3" {
+    bucket         = "stellar-oracle-terraform-state"
+    key            = "eu-west-1/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-state-lock"
+    encrypt        = true
+  }
+
   required_version = ">= 1.5.0"
 
   required_providers {

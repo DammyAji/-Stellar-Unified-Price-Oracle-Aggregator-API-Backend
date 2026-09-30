@@ -3,7 +3,8 @@ export type DomainEvent =
   | PriceHistoryRequestedEvent
   | ApiKeyCreatedEvent
   | ApiKeyRevokedEvent
-  | WebhookReceivedEvent;
+  | WebhookReceivedEvent
+  | CorsAllowlistChangedEvent;
 
 export interface PriceRequestedEvent {
   type: 'price-requested';
@@ -45,6 +46,18 @@ export interface WebhookReceivedEvent {
   payload: {
     source: string;
     eventType: string;
+  };
+  timestamp: number;
+}
+
+export interface CorsAllowlistChangedEvent {
+  type: 'cors-allowlist-changed';
+  payload: {
+    origin: string;
+    action: 'added' | 'removed';
+    before: string[];
+    after: string[];
+    actor: string;
   };
   timestamp: number;
 }

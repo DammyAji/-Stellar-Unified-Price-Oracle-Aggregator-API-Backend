@@ -1,13 +1,22 @@
 import http from 'http';
 import https from 'https';
-import net from 'net';
-import dns from 'dns';
-import { URL } from 'url';
+import {
+  SsrfError,
+  createSecureLookup,
+  isPrivateIp,
+  validateOutboundUrl as validateWithPolicy,
+  type SsrfPolicy,
+} from '@stellar-oracle/ssrf-guard';
 import { logger } from '../observability/logger';
 import { config } from './config';
 
 /**
  * SSRF protection for outbound HTTP requests to oracle sources.
+ *
+ * The checks themselves live in `@stellar-oracle/ssrf-guard` so the API's
+ * user-controlled egress runs the same policy (issue #600) instead of a second
+ * copy of the range tables. This module is the wiring: it binds that policy to
+ * this service's config and logger, and builds the pooled agents.
  *
  * Provides:
  *  - Protocol enforcement (http/https only)
@@ -16,75 +25,23 @@ import { config } from './config';
  *  - DNS rebinding mitigation (every resolved address used for the actual
  *    socket connection is re-validated via a custom lookup)
  *  - Structured logging of blocked attempts
+ *
+ * The config object is read on each call rather than captured once: tests
+ * `doMock` the config module before importing this one, and an operator's
+ * config change should not be frozen out by a module-load-time snapshot.
  */
 
-export class SsrfError extends Error {
-  constructor(
-    message: string,
-    public readonly url: string,
-    public readonly reason: string,
-  ) {
-    super(message);
-    this.name = 'SsrfError';
-  }
-}
+export { SsrfError, isPrivateIp };
 
-/** CIDR-style ranges that must never be reachable from an outbound request. */
-const BLOCKED_V4_RANGES: Array<[string, number]> = [
-  ['0.0.0.0', 8], // "this" network
-  ['10.0.0.0', 8], // private
-  ['100.64.0.0', 10], // carrier-grade NAT
-  ['127.0.0.0', 8], // loopback
-  ['169.254.0.0', 16], // link-local (cloud metadata, e.g. 169.254.169.254)
-  ['172.16.0.0', 12], // private
-  ['192.0.0.0', 24], // IETF protocol assignments
-  ['192.0.2.0', 24], // TEST-NET-1
-  ['192.168.0.0', 16], // private
-  ['198.18.0.0', 15], // benchmarking
-  ['198.51.100.0', 24], // TEST-NET-2
-  ['203.0.113.0', 24], // TEST-NET-3
-  ['224.0.0.0', 4], // multicast
-  ['240.0.0.0', 4], // reserved
-];
-
-function ipv4ToLong(ip: string): number {
-  return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
-}
-
-function inV4Range(ip: string, range: string, bits: number): boolean {
-  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-  return (ipv4ToLong(ip) & mask) === (ipv4ToLong(range) & mask);
-}
-
-/**
- * Returns true if the given IP literal belongs to a private, loopback,
- * link-local, or otherwise non-routable range.
- */
-export function isPrivateIp(ip: string): boolean {
-  const family = net.isIP(ip);
-
-  if (family === 4) {
-    return BLOCKED_V4_RANGES.some(([range, bits]) => inV4Range(ip, range, bits));
-  }
-
-  if (family === 6) {
-    const normalized = ip.toLowerCase();
-    // IPv4-mapped IPv6 (::ffff:a.b.c.d) — validate the embedded v4 address.
-    const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isPrivateIp(mapped[1]);
-
-    return (
-      normalized === '::1' || // loopback
-      normalized === '::' || // unspecified
-      normalized.startsWith('fc') || // unique local fc00::/7
-      normalized.startsWith('fd') ||
-      normalized.startsWith('fe80') || // link-local
-      normalized.startsWith('ff') // multicast
-    );
-  }
-
-  // Unknown / unparseable — treat as unsafe.
-  return true;
+function currentPolicy(): SsrfPolicy {
+  return {
+    requireHttps: false,
+    allowedHosts: config.security.ssrf.allowedHosts,
+    allowPrivateIps: config.security.ssrf.allowPrivateIps,
+    // The allowlist is this service's host control, and the lookup below still
+    // refuses private resolutions, so local names stay permitted here.
+    allowLocalHostnames: true,
+  };
 }
 
 /** Hosts that outbound oracle requests are permitted to reach. */
@@ -97,88 +54,24 @@ export function allowedHosts(): Set<string> {
  * private-range blocking. Throws {@link SsrfError} when the URL is not allowed.
  */
 export function validateOutboundUrl(rawUrl: string): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new SsrfError('Malformed outbound URL', rawUrl, 'malformed-url');
-  }
-
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new SsrfError(`Blocked protocol "${parsed.protocol}"`, rawUrl, 'protocol');
-  }
-
-  const host = parsed.hostname.toLowerCase();
-  const allow = allowedHosts();
-  if (allow.size > 0 && !allow.has(host)) {
-    throw new SsrfError(`Host "${host}" is not in the oracle allowlist`, rawUrl, 'allowlist');
-  }
-
-  // If the host is already an IP literal, validate it directly.
-  if (net.isIP(host) && !config.security.ssrf.allowPrivateIps && isPrivateIp(host)) {
-    throw new SsrfError(`Host "${host}" resolves to a private range`, rawUrl, 'private-ip');
-  }
-
-  return parsed;
+  return validateWithPolicy(rawUrl, currentPolicy());
 }
 
-/**
- * Custom DNS lookup used by the outbound agents. It resolves all addresses for
- * the hostname, re-validates them against the private-range blocklist, and only
- * hands a safe address to the socket. This closes the DNS-rebinding window where
- * a hostname passes allowlist checks but later resolves to an internal IP.
- *
- * net.js calls this in two different modes. With `all: true` — which is what it
- * uses when `autoSelectFamily` (Happy Eyeballs) is on, the default since Node
- * 20 — it expects the full array back. Otherwise it expects a single address.
- * The result must match the mode that was requested.
- */
-function secureLookup(
-  hostname: string,
-  options: dns.LookupOptions,
-  callback: (err: NodeJS.ErrnoException | null, address: string | dns.LookupAddress[], family: number) => void,
-): void {
-  dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
-    if (err) {
-      callback(err, '', 0);
-      return;
-    }
-
-    const list = addresses as dns.LookupAddress[];
-    const safe = config.security.ssrf.allowPrivateIps
-      ? list
-      : list.filter((a) => !isPrivateIp(a.address));
-
-    if (safe.length === 0) {
-      logger.error('[SSRF] Blocked outbound request — DNS rebinding', {
-        host: hostname,
-        resolved: list.map((a) => a.address),
-      });
-      const blocked = new SsrfError(
-        `All resolved addresses for "${hostname}" are private`,
-        hostname,
-        'dns-rebinding',
-      ) as NodeJS.ErrnoException;
-      callback(blocked, '', 0);
-      return;
-    }
-
-    // Returning a single address while `all: true` was requested makes net.js
-    // index `[0]` off a string, and every outbound request then fails with
-    // ERR_INVALID_IP_ADDRESS before it ever reaches the socket.
-    if (options?.all) {
-      callback(null, safe, 0);
-      return;
-    }
-
-    callback(null, safe[0].address, safe[0].family);
+function onBlocked(info: { host: string; addresses: string[] }): void {
+  logger.error('[SSRF] Blocked outbound request — DNS rebinding', {
+    host: info.host,
+    resolved: info.addresses,
   });
 }
 
 let secureHttpAgent: http.Agent | null = null;
 let secureHttpsAgent: https.Agent | null = null;
+let secureLookup: ReturnType<typeof createSecureLookup> | null = null;
 
 export function getSecureAgents(): { httpAgent: http.Agent; httpsAgent: https.Agent } {
+  if (!secureLookup) {
+    secureLookup = createSecureLookup({ getPolicy: currentPolicy, onBlocked });
+  }
   if (!secureHttpAgent) {
     secureHttpAgent = new http.Agent({
       lookup: secureLookup,

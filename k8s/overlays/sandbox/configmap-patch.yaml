@@ -5,7 +5,7 @@ metadata:
 data:
   LOG_LEVEL: debug
   SANDBOX_ENABLED: "true"
-  AGGREGATOR_URL: http://aggregator.stellar-oracle-sandbox.svc.cluster.local:4000
+  AGGREGATOR_URL: http://aggregator.stellar-oracle-sandbox.svc.cluster.local:4002
   DATABASE_URL: ""
   USE_TIMESCALEDB: "false"
   WATCHED_ASSETS: XLM,USDC,BTC,ETH,USDT

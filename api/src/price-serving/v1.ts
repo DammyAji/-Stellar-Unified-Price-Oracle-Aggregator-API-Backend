@@ -16,9 +16,11 @@ import { Router, Request, Response } from 'express';
 import { conditionalCache } from './conditional-cache';
 import { eventBus } from '../domain-events';
 import complianceRoutes from '../governance/compliance';
+import { apiKeyManager } from '../governance/api-key-manager';
 import { issueWsCsrfToken, isCsrfEnabled } from '../infrastructure/csrf';
 import { config } from '../infrastructure/config';
 import { ok, okCached, fail } from '../infrastructure/response';
+import { sendError } from '../infrastructure/error';
 
 const router = Router();
 let pricesCache: HybridCache<unknown>;
@@ -211,7 +213,12 @@ router.get('/history/:asset', async (req: Request, res: Response) => {
   }
   cacheMissTotal.inc();
 
-  const history = await readPriceHistoryCursor(upperAsset, cursor, limit, to);
+  let history: Awaited<ReturnType<typeof readPriceHistoryCursor>>;
+  try {
+    history = await readPriceHistoryCursor(upperAsset, cursor, limit, to);
+  } catch (err) {
+    return sendError(res, err, { path: req.path, method: req.method, requestId: req.requestId });
+  }
   const page = history.length > limit ? history.slice(0, limit) : history;
   const pagination = buildCursorMeta(history, limit, 'timestamp');
 
@@ -254,7 +261,12 @@ router.get('/history/:asset/legacy', async (req: Request, res: Response) => {
   }
   cacheMissTotal.inc();
 
-  const history = await readPriceHistory(upperAsset, from, to, limit);
+  let history: Awaited<ReturnType<typeof readPriceHistory>>;
+  try {
+    history = await readPriceHistory(upperAsset, from, to, limit);
+  } catch (err) {
+    return sendError(res, err, { path: req.path, method: req.method, requestId: req.requestId });
+  }
   const response = {
     asset: upperAsset,
     from: from || null,
@@ -304,7 +316,11 @@ router.get('/health/live', (_req: Request, res: Response) => {
 router.get('/health/ready', async (_req: Request, res: Response) => {
   const prices = await readAssetPrices();
   const ready = prices.length > 0;
-  res.status(ready ? 200 : 503).json({ status: ready ? 'ready' : 'not_ready', assetsTracked: prices.length });
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not_ready',
+    assetsTracked: prices.length,
+    keyStore: apiKeyManager.getBootstrapReport().health,
+  });
 });
 
 router.get('/health', async (req: Request, res: Response) => {

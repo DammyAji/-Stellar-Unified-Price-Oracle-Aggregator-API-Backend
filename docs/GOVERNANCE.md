@@ -49,3 +49,125 @@ git config commit.gpgsign true
 
 GitHub verifies signatures against keys added to the contributor's account
 under Settings → SSH and GPG keys.
+
+## Admin API roles and permissions
+
+The admin/governance API (`/admin/*`) authorizes callers per route rather than
+behind a single admin-only door (issue #596).
+
+### Roles
+
+| Role | Level | Intent |
+|---|---|---|
+| `admin` | 3 | Full control: key deletion, CORS changes, restores, DR |
+| `operator` | 2 | Day-to-day operations: create/rotate/revoke keys, run jobs |
+| `viewer` | 1 | Read-only access to keys, status, and reports |
+
+A key's role is stored on the key itself (`role` in the key metadata). The
+special environment key (`ADMIN_API_KEY`) authenticates as `admin` regardless
+of its stored role.
+
+Roles are validated in two places:
+
+- `POST /admin/keys` rejects unknown roles with `400 INVALID_ROLE`.
+- The admin authentication middleware rejects keys carrying an unknown role
+  with `403 UNKNOWN_ROLE` before any route handler runs, so an unrecognized
+  role can never satisfy a role check by accident.
+
+### Permissions
+
+Each guarded route declares both a minimum role and a permission. The
+permission is enforced when the presented key declares scopes: a key with
+scopes may only exercise permissions it explicitly lists. Keys without scopes
+are unrestricted within their role.
+
+| Permission | admin | operator | viewer |
+|---|---|---|---|
+| `keys:read` | yes | yes | yes |
+| `keys:write` | yes | yes | no |
+| `keys:rotate` | yes | yes | no |
+| `keys:delete` | yes | no | no |
+| `roles:write` | yes | no | no |
+| `metrics:read` | yes | yes | yes |
+| `cors:read` | yes | yes | yes |
+| `cors:write` | yes | no | no |
+| `backup:read` | yes | yes | yes |
+| `backup:write` | yes | yes | no |
+| `archival:write` | yes | yes | no |
+| `consistency:write` | yes | yes | no |
+| `circuit:write` | yes | yes | no |
+| `system:read` | yes | yes | yes |
+| `dr:read` | yes | yes | yes |
+
+### Route matrix
+
+Every `/admin` route declares `requireRole(minRole, permission)` explicitly:
+
+| Route | Min role | Permission |
+|---|---|---|
+| `POST /keys` | operator | `keys:write` |
+| `GET /keys` | viewer | `keys:read` |
+| `GET /keys/:keyHash` | viewer | `keys:read` |
+| `POST /keys/:keyHash/rotate` | operator | `keys:rotate` |
+| `PUT /keys/:keyHash/tier` | operator | `keys:write` |
+| `PUT /keys/:keyHash/rate-limit` | operator | `keys:write` |
+| `POST /keys/:keyHash/revoke` | operator | `keys:write` |
+| `POST /keys/:keyHash/reactivate` | operator | `keys:write` |
+| `DELETE /keys/:keyHash` | admin | `keys:delete` |
+| `GET /cors/origins` | viewer | `cors:read` |
+| `POST /cors/origins` | admin | `cors:write` |
+| `DELETE /cors/origins` | admin | `cors:write` |
+| `GET /db/pool` | viewer | `system:read` |
+| `GET /db/health` | viewer | `system:read` |
+| `POST /archival/run` | operator | `archival:write` |
+| `POST /archival/restore` | admin | `archival:write` |
+| `POST /consistency/check` | operator | `consistency:write` |
+| `POST /backup/run` | operator | `backup:write` |
+| `GET /backup/list` | viewer | `backup:read` |
+| `POST /backup/test-restore` | admin | `backup:write` |
+| `POST /backup/restore` | admin | `backup:write` |
+| `GET /dr/status` | viewer | `dr:read` |
+| `GET /circuit-breakers` | viewer | `system:read` |
+| `POST /circuit-breakers/:source/reset` | operator | `circuit:write` |
+| `POST /circuit-breakers/reset-all` | operator | `circuit:write` |
+| `GET /health` | viewer | `system:read` |
+
+CORS mutation and restore routes are admin-only even though they are not key
+operations — writing the shared origin allowlist or replacing data from a
+backup is a higher-blast-radius action than routine operations. This
+deliberate deviation from "everything else is operator" is called out in the
+matrix so a reviewer can challenge it.
+
+### Escalation rules
+
+- A key may only create keys of its own level or lower. An `operator` key
+  receives `403 FORBIDDEN` when it posts `role: 'admin'`.
+- A key may only rotate, revoke, retier, or re-rate-limit keys at or below its
+  own level. This prevents an operator from taking over an admin key.
+- No admin route changes a key's role; role changes require deleting and
+  recreating the key.
+- No route grants a higher role than the caller's own.
+
+### Denial telemetry
+
+Every denial produces all three of:
+
+- **Response** — `403` with `error.code` of `FORBIDDEN`, `UNKNOWN_ROLE`, or
+  `SCOPE_DENIED`.
+- **Audit entry** — `authz.denied` in the audit log with reason, role, route,
+  and key prefix.
+- **Metric** — `rbac_denied_total{role, route, reason}`.
+
+The most recent 100 denials are also kept in an in-memory buffer
+(`getRecentAuthzDenials()`) for diagnostics and tests.
+
+### Adding a route
+
+1. Call `requireRole(minRole, permission)` on the route in
+   `api/src/governance/admin.ts`.
+2. If the permission is new, add it to `ROLE_PERMISSIONS` in
+   `api/src/governance/rbac.ts`.
+3. Add the route to the `EXPECTED` map in
+   `api/tests/admin/rbac-route-matrix.test.ts` — the test enumerates the
+   router and fails if a route lacks a guard or declares a different role
+   than the frozen matrix.

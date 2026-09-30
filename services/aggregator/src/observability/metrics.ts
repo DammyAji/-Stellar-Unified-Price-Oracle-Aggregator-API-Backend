@@ -196,6 +196,67 @@ export const pipelineStageLatencyMs = new client.Histogram({
   registers: [register],
 });
 
+// Issue #577 — Merkle batch path vs per-asset submission metrics.
+// Distinguishes the batch (submit_batch + N apply_batch_entry) path from the
+// per-asset (N x submit_price) path so operators can compare round cost.
+export const contractSubmissionsTotal = new client.Counter({
+  name: 'contract_submissions_total',
+  help: 'Total contract submissions grouped by path (batch|per_asset) and status',
+  labelNames: ['path', 'status'],
+  registers: [register],
+});
+
+export const contractBatchRoundFeesTotal = new client.Counter({
+  name: 'contract_batch_round_fees_total',
+  help: 'Total fees (stroops) charged across all transactions in a batch round',
+  labelNames: ['path'],
+  registers: [register],
+});
+
+export const contractBatchRoundTransactions = new client.Histogram({
+  name: 'contract_batch_round_transactions',
+  help: 'Number of transactions used per publish round (1 for batch commit + N applies vs N for per-asset)',
+  labelNames: ['path'],
+  buckets: [1, 2, 4, 8, 16, 32, 64],
+  registers: [register],
+});
+
+// Issue #576 — submission outcome metrics (distinct from send latency).
+// contractSubmissionOutcome.inc() is called only once getTransaction resolves
+// with a terminal status so the counter reflects real on-chain outcomes, not
+// just network acceptance.
+export const contractSubmissionOutcome = new client.Counter({
+  name: 'contract_submission_outcome_total',
+  help: 'Terminal outcome of a Soroban transaction: success, failed, timeout, or not_found',
+  labelNames: ['function', 'asset', 'outcome'],
+  registers: [register],
+});
+
+// Ratio of failed outcomes to total outcomes in the last measurement window.
+// Alert when this ratio exceeds an operator-defined threshold (not just on
+// exceptions, which the send error path already covers).
+export const contractOutcomeFailureRatio = new client.Gauge({
+  name: 'contract_outcome_failure_ratio',
+  help: 'Rolling ratio of failed on-chain submission outcomes (failed+timeout+not_found) to total outcomes',
+  labelNames: ['function'],
+  registers: [register],
+});
+
+// Sliding window counters for failure-ratio calculation.
+export const contractOutcomeTotalWindow = new client.Gauge({
+  name: 'contract_outcome_total_window',
+  help: 'Total submission outcomes tracked in the current failure-ratio window',
+  labelNames: ['function'],
+  registers: [register],
+});
+
+export const contractOutcomeFailedWindow = new client.Gauge({
+  name: 'contract_outcome_failed_window',
+  help: 'Failed submission outcomes (failed+timeout+not_found) in the current failure-ratio window',
+  labelNames: ['function'],
+  registers: [register],
+});
+
 // Issue #578 — RPC call tracking per round and total
 export const contractRpcCallsTotal = new client.Counter({
   name: 'contract_rpc_calls_total',
@@ -235,6 +296,28 @@ export const retryQueueDepth = new client.Gauge({
 export const retryQueueOrphanedRetriesTotal = new client.Counter({
   name: 'retry_queue_orphaned_retries_total',
   help: 'Total number of retries that were orphaned or dropped on shutdown',
+  registers: [register],
+});
+
+// Issue #589 — History file integrity
+export const historyFileReadFailuresTotal = new client.Counter({
+  name: 'history_file_read_failures_total',
+  help: 'Total history file read failures by asset and reason (unreadable, undecryptable, malformed)',
+  labelNames: ['asset', 'reason'],
+  registers: [register],
+});
+
+export const historyFileQuarantinesTotal = new client.Counter({
+  name: 'history_file_quarantines_total',
+  help: 'Total history files moved to data/quarantine after a parse or decrypt failure',
+  labelNames: ['asset', 'reason'],
+  registers: [register],
+});
+
+export const historyFileWriteFailuresTotal = new client.Counter({
+  name: 'history_file_write_failures_total',
+  help: 'Total history file append failures by asset and reason',
+  labelNames: ['asset', 'reason'],
   registers: [register],
 });
 

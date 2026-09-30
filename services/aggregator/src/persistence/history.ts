@@ -2,6 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import { config } from '../infrastructure/config';
 import { encrypt, decrypt, isEncrypted, isEncryptionConfigured } from '../infrastructure/crypto';
+import { logger } from '../observability/logger';
+import {
+  historyFileReadFailuresTotal,
+  historyFileQuarantinesTotal,
+  historyFileWriteFailuresTotal,
+} from '../observability/metrics';
 
 export interface HistoricalPriceEntry {
   price: string;
@@ -11,7 +17,47 @@ export interface HistoricalPriceEntry {
 }
 
 export const DATA_DIR = path.resolve(__dirname, '../../data');
+export const QUARANTINE_DIR = path.join(DATA_DIR, 'quarantine');
 export const HISTORY_FILE = (asset: string) => path.join(DATA_DIR, `history-${asset.toLowerCase()}.json`);
+
+export type HistoryFailureReason = 'unreadable' | 'undecryptable' | 'malformed';
+
+/**
+ * Issue #589 — raised instead of silently returning an empty history when a
+ * file exists but cannot be read, decrypted or parsed. `reason` lets callers
+ * tell a key problem (`undecryptable`) from truncation (`malformed`) or an
+ * I/O problem (`unreadable`).
+ */
+export class HistoryReadError extends Error {
+  readonly name = 'HistoryReadError';
+  readonly reason: HistoryFailureReason;
+  readonly filePath: string;
+
+  constructor(message: string, reason: HistoryFailureReason, filePath: string, cause?: unknown) {
+    super(message, cause !== undefined ? { cause } : undefined);
+    this.reason = reason;
+    this.filePath = filePath;
+    Object.setPrototypeOf(this, HistoryReadError.prototype);
+  }
+}
+
+/** Issue #589 — raised when an append could not be confirmed durable. */
+export class HistoryWriteError extends Error {
+  readonly name = 'HistoryWriteError';
+  readonly filePath: string;
+
+  constructor(message: string, filePath: string, cause?: unknown) {
+    super(message, cause !== undefined ? { cause } : undefined);
+    this.filePath = filePath;
+    Object.setPrototypeOf(this, HistoryWriteError.prototype);
+  }
+}
+
+export type HistoryFileStatus =
+  | { state: 'absent' }
+  | { state: 'empty' }
+  | { state: 'ok'; entries: HistoricalPriceEntry[] }
+  | { state: 'unreadable'; reason: HistoryFailureReason; error: HistoryReadError };
 
 export function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -24,29 +70,160 @@ export function historyEncryptionEnabled(): boolean {
   return config.security.encryption.encryptHistory && isEncryptionConfigured();
 }
 
+function describeCause(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function classifyFailure(err: unknown): HistoryFailureReason {
+  const message = describeCause(err);
+  if (
+    /No encryption key available|authentication tag|Malformed encrypted payload|Unsupported encryption/i.test(message)
+  ) {
+    return 'undecryptable';
+  }
+  if (err instanceof SyntaxError) return 'malformed';
+  return 'unreadable';
+}
+
+function buildReadError(filePath: string, err: unknown): HistoryReadError {
+  const reason = classifyFailure(err);
+  return new HistoryReadError(
+    `Failed to read history file ${filePath} (${reason}): ${describeCause(err)}`,
+    reason,
+    filePath,
+    err,
+  );
+}
+
+/**
+ * Issue #589 — the single place that decides whether a history file is absent,
+ * empty, readable or unreadable. Never rewrites or quarantines anything.
+ */
+export function readHistoryFileStatus(filePath: string): HistoryFileStatus {
+  if (!fs.existsSync(filePath)) return { state: 'absent' };
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf-8');
+  } catch (err) {
+    const error = buildReadError(filePath, err);
+    return { state: 'unreadable', reason: error.reason, error };
+  }
+
+  if (!raw.trim()) return { state: 'empty' };
+
+  try {
+    const contents = isEncrypted(raw) ? decrypt(raw) : raw;
+    const parsed = JSON.parse(contents) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new SyntaxError('history file does not contain a JSON array');
+    }
+    return { state: 'ok', entries: parsed as HistoricalPriceEntry[] };
+  } catch (err) {
+    const error = buildReadError(filePath, err);
+    return { state: 'unreadable', reason: error.reason, error };
+  }
+}
+
 export function readHistoryFile(filePath: string): HistoricalPriceEntry[] {
-  if (!fs.existsSync(filePath)) return [];
-  const raw = fs.readFileSync(filePath, 'utf-8');
-  if (!raw) return [];
-  const contents = isEncrypted(raw) ? decrypt(raw) : raw;
-  return JSON.parse(contents) as HistoricalPriceEntry[];
+  const status = readHistoryFileStatus(filePath);
+  if (status.state === 'unreadable') throw status.error;
+  if (status.state === 'ok') return status.entries;
+  return [];
+}
+
+function fsyncBestEffort(tmpPath: string): void {
+  try {
+    const fd = fs.openSync(tmpPath, 'r');
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    /* best effort — rename below still keeps the file consistent */
+  }
+}
+
+function writePayloadAtomically(filePath: string, payload: string): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    fs.writeFileSync(tmpPath, payload);
+    fsyncBestEffort(tmpPath);
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {
+      /* leave nothing behind */
+    }
+    throw err;
+  }
 }
 
 export function writeHistoryFile(filePath: string, history: HistoricalPriceEntry[]): void {
   const serialized = JSON.stringify(history);
   const payload = historyEncryptionEnabled() ? encrypt(serialized) : serialized;
-  writeAtomic(filePath, payload);
+  writePayloadAtomically(filePath, payload);
 }
 
 /**
- * Writes via a temp file + rename so an abrupt kill can never leave a partial
- * file on disk (issue #579): the write happens to `filePath.tmp-<pid>`, and
- * `renameSync` swaps it in place in one atomic filesystem operation.
+ * Issue #589 — read the file back and compare it to what was written so an
+ * append is only treated as durable once it is proven to be on disk.
  */
-export function writeAtomic(filePath: string, payload: string): void {
-  const tmpPath = `${filePath}.tmp-${process.pid}`;
-  fs.writeFileSync(tmpPath, payload);
-  fs.renameSync(tmpPath, filePath);
+export function verifyHistoryFile(filePath: string, expected: HistoricalPriceEntry[]): void {
+  const status = readHistoryFileStatus(filePath);
+  if (status.state !== 'ok') {
+    const detail = status.state === 'unreadable' ? status.error.message : `file is ${status.state}`;
+    throw new HistoryWriteError(
+      `Post-write verification failed for ${filePath}: ${detail}`,
+      filePath,
+      status.state === 'unreadable' ? status.error : undefined,
+    );
+  }
+  if (
+    status.entries.length !== expected.length ||
+    JSON.stringify(status.entries) !== JSON.stringify(expected)
+  ) {
+    throw new HistoryWriteError(
+      `Post-write verification failed for ${filePath}: expected ${expected.length} entries, read ${status.entries.length}`,
+      filePath,
+    );
+  }
+}
+
+/**
+ * Move a file that failed to parse out of the active history namespace so the
+ * next append cannot destroy it. Returns the quarantine path.
+ */
+function quarantineHistoryFile(filePath: string, asset: string, reason: HistoryFailureReason): string {
+  fs.mkdirSync(QUARANTINE_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const target = path.join(QUARANTINE_DIR, `history-${asset.toLowerCase()}-${reason}-${stamp}.json`);
+  fs.renameSync(filePath, target);
+  return target;
+}
+
+function recordIntegrityFailure(
+  operation: 'read' | 'quarantine' | 'write',
+  asset: string,
+  reason: HistoryFailureReason,
+  filePath: string,
+): void {
+  if (operation === 'read') historyFileReadFailuresTotal.inc({ asset: asset.toLowerCase(), reason });
+  if (operation === 'quarantine') historyFileQuarantinesTotal.inc({ asset: asset.toLowerCase(), reason });
+  if (operation === 'write') historyFileWriteFailuresTotal.inc({ asset: asset.toLowerCase(), reason });
+
+  logger.error('History file integrity failure', {
+    operation,
+    asset,
+    reason,
+    filePath,
+    severity: 'error',
+    alert: 'history-file-integrity',
+  });
 }
 
 /**
@@ -74,14 +251,64 @@ export function appendHistoricalPrice(
 ): void {
   ensureDataDir();
   const filePath = HISTORY_FILE(asset);
-  let history: HistoricalPriceEntry[] = [];
+  const entry: HistoricalPriceEntry = { price, decimals, source, timestamp };
+
+  const status = readHistoryFileStatus(filePath);
+  let history: HistoricalPriceEntry[];
+
+  if (status.state === 'unreadable') {
+    recordIntegrityFailure('read', asset, status.reason, filePath);
+    let quarantinePath: string;
+    try {
+      quarantinePath = quarantineHistoryFile(filePath, asset, status.reason);
+    } catch (err) {
+      recordIntegrityFailure('write', asset, status.reason, filePath);
+      throw new HistoryReadError(
+        `Refusing to overwrite unreadable history file ${filePath} and quarantine failed: ${describeCause(err)}`,
+        status.reason,
+        filePath,
+        err,
+      );
+    }
+    recordIntegrityFailure('quarantine', asset, status.reason, quarantinePath);
+    logger.error('Quarantined unreadable history file; starting a new file from the recovered entry', {
+      asset,
+      reason: status.reason,
+      originalPath: filePath,
+      quarantinePath,
+      errorMessage: status.error.message,
+      severity: 'error',
+      alert: 'history-file-integrity',
+    });
+    history = [];
+  } else if (status.state === 'ok') {
+    history = status.entries;
+  } else {
+    history = [];
+  }
+
+  history.push(entry);
+  const pruned = pruneHistory(history);
+
   try {
-    history = readHistoryFile(filePath);
-  } catch { /* ignore corrupt data */ }
-  history.push({ price, decimals, source, timestamp });
-  writeHistoryFile(filePath, pruneHistory(history));
+    writeHistoryFile(filePath, pruned);
+    verifyHistoryFile(filePath, pruned);
+  } catch (err) {
+    recordIntegrityFailure('write', asset, 'unreadable', filePath);
+    throw err instanceof HistoryWriteError || err instanceof HistoryReadError
+      ? err
+      : new HistoryWriteError(
+          `Failed to append to history file ${filePath}: ${describeCause(err)}`,
+          filePath,
+          err,
+        );
+  }
 }
 
+/**
+ * Issue #589 — absent and empty histories are legitimate empty results;
+ * an unreadable file throws instead of being reported as "no data".
+ */
 export function getHistoricalPrices(
   asset: string,
   from?: number,
@@ -89,12 +316,8 @@ export function getHistoricalPrices(
   limit = 100,
 ): HistoricalPriceEntry[] {
   const filePath = HISTORY_FILE(asset);
-  try {
-    let history = readHistoryFile(filePath);
-    if (from) history = history.filter((h) => h.timestamp >= from);
-    if (to) history = history.filter((h) => h.timestamp <= to);
-    return history.slice(-limit);
-  } catch {
-    return [];
-  }
+  let history = readHistoryFile(filePath);
+  if (from) history = history.filter((h) => h.timestamp >= from);
+  if (to) history = history.filter((h) => h.timestamp <= to);
+  return history.slice(-limit);
 }
