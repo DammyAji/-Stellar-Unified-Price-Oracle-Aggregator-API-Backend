@@ -34,18 +34,30 @@ spec:
           env:
             - name: PORT
               value: "4000"
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http-health
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/ready
               port: http-health
             initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/live
               port: http-health
             initialDelaySeconds: 30
-            periodSeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 5
           resources:
             requests:
               cpu: 100m
