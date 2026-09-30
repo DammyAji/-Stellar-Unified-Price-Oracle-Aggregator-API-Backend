@@ -104,6 +104,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         encryptHistory: parsed.ENCRYPT_HISTORY,
       },
     },
+
+    websocket: {
+      maxSubscriptions: parsed.WS_MAX_SUBSCRIPTIONS,
+      dropBufferBytes: parsed.WS_BACKPRESSURE_DROP_BYTES,
+      pingIntervalMs: parsed.WS_PING_INTERVAL_MS,
+      pingTimeoutMs: parsed.WS_PING_TIMEOUT_MS,
+      maxClientMessageBytes: parsed.WS_MAX_CLIENT_MESSAGE_BYTES,
+    },
   };
 }
 

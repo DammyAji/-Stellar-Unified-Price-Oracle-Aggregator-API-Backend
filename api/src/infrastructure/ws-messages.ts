@@ -5,6 +5,11 @@
  * callers get compile-time checking and typos are impossible. Each inline-flat
  * message that the server emits is additionally modeled with a discriminated
  * union on `type` so consumers and tests can narrow on the message kind.
+ *
+ * This file covers the API socket (3001). The aggregator's push socket
+ * (`PORT + 1`, 4001 by default) runs a separate versioned envelope with its own
+ * subscription and backpressure rules — see docs/AGGREGATOR_WEBSOCKET.md and
+ * services/aggregator/src/infrastructure/ws-protocol.ts.
  */
 
 /** Messages the client sends to the server (inbound). */

@@ -47,6 +47,35 @@ export const wsErrorsTotal = new client.Counter({
   registers: [register],
 });
 
+// #587 — Push channel backpressure, liveness and subscription visibility
+export const wsClientsDroppedTotal = new client.Counter({
+  name: 'ws_clients_dropped_total',
+  help: 'Total WebSocket clients dropped by the server (backpressure, ping timeout, oversized message)',
+  labelNames: ['service', 'reason'],
+  registers: [register],
+});
+
+export const wsMessagesDroppedTotal = new client.Counter({
+  name: 'ws_messages_dropped_total',
+  help: 'Total WebSocket messages that were not delivered to a client',
+  labelNames: ['service', 'reason'],
+  registers: [register],
+});
+
+export const wsBufferedBytes = new client.Gauge({
+  name: 'ws_buffered_bytes',
+  help: 'Sum of bytes queued in WebSocket client send buffers',
+  labelNames: ['service'],
+  registers: [register],
+});
+
+export const wsSubscriptionsActive = new client.Gauge({
+  name: 'ws_subscriptions_active',
+  help: 'Total asset subscriptions held by connected WebSocket clients',
+  labelNames: ['service'],
+  registers: [register],
+});
+
 // #64 — Oracle source latency tracking
 export const oracleSourceLatency = new client.Histogram({
   name: 'oracle_source_request_duration_seconds',
