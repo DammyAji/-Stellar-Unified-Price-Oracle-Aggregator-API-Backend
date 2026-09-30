@@ -21,7 +21,7 @@ export const config = {
   },
   port: parseInt(process.env.API_PORT || '3000', 10),
   wsPort: parseInt(process.env.WS_PORT || '3001', 10),
-  aggregatorUrl: process.env.AGGREGATOR_URL || 'http://localhost:4000',
+  aggregatorUrl: process.env.AGGREGATOR_URL || 'http://localhost:4002',
   stellarRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
   contractId: process.env.CONTRACT_ID || '',
   networkPassphrase: process.env.NETWORK_PASSPHRASE || 'Test SDF Network ; September 2015',
@@ -33,6 +33,11 @@ export const config = {
     .map((url) => url.trim())
     .filter(Boolean),
   geoIpDatabasePath: process.env.GEOIP_DATABASE_PATH || '',
+  publicBaseUrl: process.env.PUBLIC_BASE_URL || '',
+  publicAllowedHosts: (process.env.PUBLIC_BASE_ALLOWED_HOSTS || '')
+    .split(',')
+    .map((host) => host.trim())
+    .filter(Boolean),
   cacheTtlMs: parseInt(process.env.CACHE_TTL_MS || '15000', 10),
   redisUrl: optionalSecretEnv('REDIS_URL'),
   priceCacheTtl: parseInt(process.env.PRICE_CACHE_TTL_MS || '15000', 10),
@@ -167,5 +172,9 @@ export const config = {
     maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || '5', 10),
     timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS || '10000', 10),
     minIntervalMs: parseInt(process.env.WEBHOOK_MIN_INTERVAL_MS || '60000', 10),
+    maxConcurrent: parseInt(process.env.WEBHOOK_MAX_CONCURRENT || '5', 10),
+    maxPendingPerDestination: parseInt(process.env.WEBHOOK_MAX_PENDING || '100', 10),
+    circuitFailureThreshold: parseInt(process.env.WEBHOOK_CIRCUIT_THRESHOLD || '3', 10),
+    circuitCooldownMs: parseInt(process.env.WEBHOOK_CIRCUIT_COOLDOWN_MS || '60000', 10),
   },
 };

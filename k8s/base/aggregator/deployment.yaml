@@ -22,8 +22,6 @@ spec:
           image: oracle-aggregator:placeholder
           imagePullPolicy: IfNotPresent
           ports:
-            - name: http-metrics
-              containerPort: 4000
             - name: ws-internal
               containerPort: 4001
             - name: http-health

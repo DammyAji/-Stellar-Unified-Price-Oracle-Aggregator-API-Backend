@@ -22,6 +22,7 @@ is verified, and *which threats it mitigates*.  All code references are to
 | 4 | WebSocket signing & upgrade protection | `api/src/governance/ws-signing.ts`, `api/src/infrastructure/csrf.ts`, `api/src/infrastructure/upgrade-guard.ts`, `api/src/infrastructure/server.ts` | WS auth/CSRF/signing suites |
 | 5 | Input sanitization | `api/src/governance/sanitization.ts` | sanitization suites |
 | 6 | Secrets management | `scripts/encrypt-secret.ts`, `scripts/rotate-secrets.sh`, `api/src/infrastructure/config.ts` (`decryptSecret`), `packages/vault-client` | `tests/encryption-at-rest.test.ts`, `docs/security/secret-rotation.md` |
+| 7 | HTTPS redirect & proxy trust | `api/src/infrastructure/https.ts`, `api/src/platform/trusted-proxy.ts` | `api/tests/middleware/https-redirect.test.ts` |
 
 ```
                           ┌─────────────────────────────┐
@@ -251,6 +252,7 @@ combined with credentialed responses.
 | WebSocket request replay | §4 | `ts` ±30 s TTL + nonce dedup + timing-safe HMAC verify | WS signing tests |
 | WebSocket handshake flood | §4 | Per-IP upgrade buckets + connection caps | upgrade-guard tests |
 | Prototype pollution / XSS / log injection | §5 | Recursive sanitization: dangerous keys stripped, markup + control chars removed | sanitization suites |
+| Open redirect / plaintext downgrade via `Host` or `X-Forwarded-Proto` | §7 | Scheme from TLS socket or trusted proxy only; redirect to `PUBLIC_BASE_URL`; unexpected `Host` → 421; HSTS only on HTTPS | `https-redirect.test.ts` |
 
 ## Review cadence
 

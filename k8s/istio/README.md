@@ -46,7 +46,7 @@ python3 scripts/validate-k8s-yaml.py
 |-------|----------|
 | `api` VirtualService | 90% stable / 10% canary on HTTP `/api` |
 | `api-ws` VirtualService | 90/10 split on TCP port 3001 |
-| `aggregator-internal` | Stable subset to port 4000 |
+| `aggregator-internal` | Stable subset to port 4002 |
 | `oracle-egress` | HTTPS egress via `istio-egressgateway` |
 
 Mesh identity: **stellar-oracle** (`meshID` on IstioOperator and proxy metadata).

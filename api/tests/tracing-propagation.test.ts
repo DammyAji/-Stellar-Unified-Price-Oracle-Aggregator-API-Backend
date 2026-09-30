@@ -261,7 +261,7 @@ describe('OpenTelemetry: Distributed Tracing with Context Propagation', () => {
         attributes: {
           'service.source': 'stellar-oracle-api',
           'service.target': 'price-aggregator',
-          'http.url': 'http://aggregator:4000/aggregate',
+          'http.url': 'http://aggregator:4002/aggregate',
         },
       });
 
