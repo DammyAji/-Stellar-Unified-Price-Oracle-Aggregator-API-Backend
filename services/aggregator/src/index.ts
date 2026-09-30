@@ -1,4 +1,4 @@
-import { config } from './infrastructure/config';
+import { config, redactedConfigView } from './infrastructure/config';
 import { tryCatchAsync } from './infrastructure/result';
 import { logger } from './observability/logger';
 import { ChainlinkSource, RedstoneSource, BandSource, ReflectorSource } from './oracle-sources';
@@ -255,6 +255,10 @@ async function main(): Promise<void> {
   logger.info('Stellar Price Oracle Aggregator starting...');
   logger.info(`Polling interval: ${config.pollingIntervalMs}ms`);
   logger.info(`Watched assets: ${config.assets.join(', ')}`);
+  logger.info(
+    'Resolved configuration (redacted)',
+    redactedConfigView(config) as Record<string, unknown>,
+  );
 
   // Enforce Prometheus cardinality budget for configured sources and assets (#553)
   enforceStartupCardinalityBudget(['chainlink', 'redstone', 'band', 'reflector'], config.assets);

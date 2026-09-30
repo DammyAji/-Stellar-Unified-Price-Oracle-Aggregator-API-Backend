@@ -1,11 +1,13 @@
 import client from 'prom-client';
 import { register } from './metrics';
+import {
+  MAX_APPROVED_SOURCES,
+  MAX_CURATED_ASSETS,
+  MAX_SERIES_BUDGET,
+  KNOWN_SOURCES,
+} from './cardinality-budget';
 
-export const MAX_APPROVED_SOURCES = 10;
-export const MAX_CURATED_ASSETS = 50;
-export const MAX_SERIES_BUDGET = 6775;
-
-export const KNOWN_SOURCES = new Set(['chainlink', 'redstone', 'band', 'reflector']);
+export { MAX_APPROVED_SOURCES, MAX_CURATED_ASSETS, MAX_SERIES_BUDGET, KNOWN_SOURCES };
 
 export const cardinalityViolationsTotal = new client.Counter({
   name: 'cardinality_violations_total',
