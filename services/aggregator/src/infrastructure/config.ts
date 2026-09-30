@@ -66,6 +66,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       maxReplicationLagMs: parsed.REGION_MAX_REPLICATION_LAG_MS,
     },
 
+    kafka: {
+      brokers: parsed.KAFKA_BROKERS,
+      sslEnabled: parsed.KAFKA_SSL_ENABLED,
+    },
+
     database: {
       url: decryptSecret(parsed.DATABASE_URL),
       useTimescale: parsed.USE_TIMESCALEDB,

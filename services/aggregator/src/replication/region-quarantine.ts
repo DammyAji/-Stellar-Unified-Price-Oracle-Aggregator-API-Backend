@@ -25,7 +25,11 @@ export class RegionQuarantineManager {
       return this.status;
     }
 
-    if (this.status.quarantined && report.maxDriftPercent <= config.region.quarantineRecoverPercent) {
+    if (
+      this.status.quarantined &&
+      report.driftKnown &&
+      report.maxDriftPercent <= config.region.quarantineRecoverPercent
+    ) {
       this.status = {
         region: config.region.id,
         quarantined: false,

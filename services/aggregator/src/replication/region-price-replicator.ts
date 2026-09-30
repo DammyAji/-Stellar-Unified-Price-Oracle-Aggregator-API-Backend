@@ -8,6 +8,10 @@ export interface DriftReport {
   maxStalenessMs: number;
   asset?: string;
   regions: string[];
+  regionCount: number;
+  peerCount: number;
+  hasPeers: boolean;
+  driftKnown: boolean;
 }
 
 export class RegionPriceReplicator {
@@ -23,6 +27,12 @@ export class RegionPriceReplicator {
 
   getLatestPrices(): RegionPriceRecord[] {
     return this.register.latestAll();
+  }
+
+  getLocalPrices(): RegionPriceRecord[] {
+    return this.register
+      .byRegion(config.region.id)
+      .filter((record) => record.source === 'local');
   }
 
   /**
@@ -46,26 +56,48 @@ export class RegionPriceReplicator {
     let maxDriftPercent = 0;
     let maxStalenessMs = 0;
     let asset: string | undefined;
+    let comparableAssets = 0;
     const regions = new Set<string>();
+    const assets = new Set<string>();
 
     for (const price of this.register.latestAll()) {
-      const records = this.register.byAsset(price.asset);
+      assets.add(price.asset);
+    }
+
+    for (const assetName of assets) {
+      const records = this.register.byAsset(assetName);
       for (const record of records) {
         regions.add(record.region);
         maxStalenessMs = Math.max(maxStalenessMs, now - record.receivedAt);
       }
+      if (records.length < 2) continue;
+
       const values = records.map((record) => Number(record.price));
       const median = values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
+      if (median === 0) continue;
+
+      comparableAssets += 1;
       for (const value of values) {
-        if (median === 0) continue;
         const drift = Math.abs(value - median) / median * 100;
         if (drift > maxDriftPercent) {
           maxDriftPercent = drift;
-          asset = price.asset;
+          asset = assetName;
         }
       }
     }
 
-    return { maxDriftPercent, maxStalenessMs, asset, regions: Array.from(regions).sort() };
+    const regionCount = regions.size;
+    const peerCount = regions.has(config.region.id) ? regionCount - 1 : regionCount;
+
+    return {
+      maxDriftPercent,
+      maxStalenessMs,
+      asset,
+      regions: Array.from(regions).sort(),
+      regionCount,
+      peerCount,
+      hasPeers: peerCount > 0,
+      driftKnown: comparableAssets > 0,
+    };
   }
 }

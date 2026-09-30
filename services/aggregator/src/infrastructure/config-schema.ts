@@ -224,6 +224,13 @@ const envShape = {
     REGION_QUARANTINE_RECOVER_PERCENT: floatVar(0.05, 0, 100),
     REGION_MAX_REPLICATION_LAG_MS: intVar(5000, 1, 600_000),
 
+    KAFKA_BROKERS: commaListSchema(
+      'KAFKA_BROKERS',
+      (entry) => entry.length > 0 && entry.length <= 253 && !/\s/.test(entry),
+      'expected a bootstrap broker as host or host:port',
+    ),
+    KAFKA_SSL_ENABLED: boolVar(false),
+
     DATABASE_URL: z.string().default(''),
     USE_TIMESCALEDB: boolVar(true),
     TIMESCALE_CHUNK_INTERVAL_SECONDS: intVar(604800, 60, 2_592_000),

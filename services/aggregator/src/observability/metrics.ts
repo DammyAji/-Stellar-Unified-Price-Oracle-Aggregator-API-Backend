@@ -301,5 +301,62 @@ export const retryQueueOrphanedRetriesTotal = new client.Counter({
   registers: [register],
 });
 
+// #581 — Cross-region replication and drift detection
+export const regionDriftPercent = new client.Gauge({
+  name: 'region_drift_percent',
+  help: 'Maximum cross-region price drift observed for the current round',
+  labelNames: ['region'],
+  registers: [register],
+});
+
+export const regionDriftKnown = new client.Gauge({
+  name: 'region_drift_known',
+  help: '1 when at least two regions reported the same asset, 0 when drift cannot be computed',
+  labelNames: ['region'],
+  registers: [register],
+});
+
+export const regionPeersReporting = new client.Gauge({
+  name: 'region_peers_reporting',
+  help: 'Peer regions that have reported at least one price into the local register',
+  labelNames: ['region'],
+  registers: [register],
+});
+
+export const regionPeersConfigured = new client.Gauge({
+  name: 'region_peers_configured',
+  help: 'Peer regions configured for cross-region replication',
+  labelNames: ['region'],
+  registers: [register],
+});
+
+export const replicationBusUp = new client.Gauge({
+  name: 'replication_bus_up',
+  help: '1 while the cross-region replication bus producer and consumer are connected',
+  labelNames: ['region'],
+  registers: [register],
+});
+
+export const replicationRecordsInboundTotal = new client.Counter({
+  name: 'replication_records_inbound_total',
+  help: 'Price records merged from remote regions over the replication bus',
+  labelNames: ['region', 'source_region'],
+  registers: [register],
+});
+
+export const replicationRecordsOutboundTotal = new client.Counter({
+  name: 'replication_records_outbound_total',
+  help: 'Local price records published to the replication bus',
+  labelNames: ['region'],
+  registers: [register],
+});
+
+export const replicationPublishFailuresTotal = new client.Counter({
+  name: 'replication_publish_failures_total',
+  help: 'Failed attempts to publish local prices to the replication bus',
+  labelNames: ['region'],
+  registers: [register],
+});
+
 export { register };
 
