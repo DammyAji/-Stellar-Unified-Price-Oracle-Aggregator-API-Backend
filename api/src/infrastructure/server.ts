@@ -1,11 +1,13 @@
 import { WebSocketServer as WsServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
+import { randomUUID } from 'crypto';
 import { logger } from '../observability/logger';
 import { validateWebSocketApiKey } from '../governance/auth';
 import { HybridCache } from '../price-serving/cache';
 import { ClientMessageType, ServerMessageType } from './ws-messages';
 import { validateWsAssets } from '../governance/sanitization';
 import { webhookService } from '../webhooks/webhook-service';
+import { clientIp as trustedClientIp } from '../platform/trusted-proxy';
 import { config } from './config';
 import { WsUpgradeGuard } from './upgrade-guard';
 import {
@@ -43,6 +45,7 @@ export class PriceWebSocketServer {
   private guard: WsUpgradeGuard;
   private clients: Set<WebSocket> = new Set();
   private subscriptions: Map<WebSocket, Set<string>> = new Map();
+  private clientIds: Map<WebSocket, string> = new Map();
   private cache: HybridCache<unknown> | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
   // Bounded per-asset replay buffer (issue #606)
@@ -75,6 +78,7 @@ export class PriceWebSocketServer {
       this.guard.onConnect(ip);
 
       const connectedAt = Date.now();
+      const clientId = randomUUID().slice(0, 8);
       this.clients.add(ws);
       this.subscriptions.set(ws, new Set());
       this.connectionKeys.set(ws, `${ip}#${++this.connectionSeq}`);
@@ -150,6 +154,8 @@ export class PriceWebSocketServer {
         {
           const subs = this.subscriptions.get(ws);
           (m.assets as string[]).forEach((a) => subs?.add(a.toUpperCase()));
+          wsSubscribeEventsTotal.inc({ action: 'subscribe' });
+          this.publishSubscriptionGauge(ws);
           ws.send(JSON.stringify({ type: ServerMessageType.Subscribed, assets: m.assets, sequenceId: globalSequence }));
         }
         break;
@@ -162,6 +168,7 @@ export class PriceWebSocketServer {
           const subs = this.subscriptions.get(ws);
           (m.assets as string[]).forEach((a) => subs?.delete(a.toUpperCase()));
           wsSubscribeEventsTotal.inc({ action: 'unsubscribe' });
+          this.publishSubscriptionGauge(ws);
           wsMessagesTotal.inc({ direction: 'inbound', type: 'unsubscribe' });
           ws.send(JSON.stringify({ type: ServerMessageType.Unsubscribed, assets: m.assets }));
         }
@@ -193,6 +200,12 @@ export class PriceWebSocketServer {
         const requestedAssets = assets
           ? (assets as string[]).map((a) => a.toUpperCase())
           : null;
+        // Replay never reaches beyond this connection's subscriptions: assets the
+        // client did not subscribe to are dropped from the request scope, so an
+        // unsubscribed connection replays nothing.
+        const scopeAssets = requestedAssets
+          ? requestedAssets.filter((a) => subscribed.has(a))
+          : Array.from(subscribed);
 
         const window = collectReplayWindow(
           this.replayBuffer.sources(requestedAssets),
@@ -239,16 +252,52 @@ export class PriceWebSocketServer {
     return seq;
   }
 
+  private subscriptionMatches(client: WebSocket, asset: string | undefined): boolean {
+    const subs = this.subscriptions.get(client);
+    return Boolean(subs && subs.size > 0 && asset && subs.has(asset));
+  }
+
+  private countDelivered(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    if (clientId) wsClientMessagesTotal.inc({ client: clientId, result: 'delivered' });
+  }
+
+  private countDropped(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    if (clientId) wsClientMessagesTotal.inc({ client: clientId, result: 'dropped' });
+  }
+
+  private publishSubscriptionGauge(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    const subs = this.subscriptions.get(client);
+    if (clientId && subs) wsClientSubscriptions.set({ client: clientId }, subs.size);
+  }
+
+  private forget(client: WebSocket): void {
+    const clientId = this.clientIds.get(client);
+    this.clients.delete(client);
+    this.subscriptions.delete(client);
+    if (clientId) {
+      this.clientIds.delete(client);
+      wsClientSubscriptions.remove(clientId);
+    }
+  }
+
   broadcast(data: PriceUpdatePayload): void {
-    const asset = data?.asset?.toUpperCase() || '_global';
+    const rawAsset = data?.asset?.toUpperCase();
+    const asset = rawAsset || '_global';
     const seq = this.bufferMessage(asset, data);
     const message = JSON.stringify({ type: ServerMessageType.PriceUpdate, sequenceId: seq, ...data });
     let sent = 0;
     this.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(message);
-        sent++;
+      if (client.readyState !== WebSocket.OPEN) return;
+      if (!this.subscriptionMatches(client, rawAsset)) {
+        this.countDropped(client);
+        return;
       }
+      client.send(message);
+      sent++;
+      this.countDelivered(client);
     });
     if (sent > 0) wsMessagesTotal.inc({ direction: 'outbound', type: 'price_update' }, sent);
   }
@@ -261,11 +310,13 @@ export class PriceWebSocketServer {
 
     this.clients.forEach((client) => {
       if (client.readyState !== WebSocket.OPEN) return;
-      const subs = this.subscriptions.get(client);
-      if (!subs || subs.size === 0 || (asset && subs.has(asset))) {
-        client.send(message);
-        sent++;
+      if (!this.subscriptionMatches(client, asset)) {
+        this.countDropped(client);
+        return;
       }
+      client.send(message);
+      sent++;
+      this.countDelivered(client);
     });
 
     if (sent > 0) wsMessagesTotal.inc({ direction: 'outbound', type: ServerMessageType.PriceUpdate }, sent);
@@ -292,11 +343,7 @@ export class PriceWebSocketServer {
   }
 
   private clientIp(req: IncomingMessage): string {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string' && forwarded.length > 0) {
-      return forwarded.split(',')[0].trim();
-    }
-    return req.socket.remoteAddress || 'unknown';
+    return trustedClientIp(req);
   }
 
   stop(): void {
