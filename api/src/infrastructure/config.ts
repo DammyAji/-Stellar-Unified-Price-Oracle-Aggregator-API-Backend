@@ -67,6 +67,15 @@ export const config = {
   geoIpDatabasePath: process.env.GEOIP_DATABASE_PATH || '',
   cacheTtlMs: parseInt(process.env.CACHE_TTL_MS || '15000', 10),
   redisUrl: optionalSecretEnv('REDIS_URL'),
+  // Shared API key store (issue #591). Defaults to redis when REDIS_URL is
+  // set, otherwise to a per-process in-memory store.
+  apiKeyStore: {
+    type: (process.env.API_KEY_STORE || (process.env.REDIS_URL ? 'redis' : 'memory')) as
+      | 'memory'
+      | 'redis',
+    refreshIntervalMs: parseInt(process.env.API_KEY_STORE_REFRESH_MS || '1000', 10),
+    failClosed: process.env.API_KEY_STORE_FAIL_CLOSED !== 'false',
+  },
   priceCacheTtl: parseInt(process.env.PRICE_CACHE_TTL_MS || '15000', 10),
   historyCacheTtl: parseInt(process.env.HISTORY_CACHE_TTL_MS || '60000', 10),
   sourcesCacheTtl: parseInt(process.env.SOURCES_CACHE_TTL_MS || '300000', 10),
