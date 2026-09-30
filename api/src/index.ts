@@ -130,6 +130,13 @@ async function initializeApp(): Promise<void> {
     logger.warn('Vault not available — using in-memory API key store fallback', err);
   }
 
+  // Fail closed in production when no key source exists (issue #592).
+  bootstrapApiKeyStore();
+
+  // Load durable webhook registrations from the shared store (issue #601).
+  await webhookService.load();
+  webhookService.startRefresh();
+
   if (config.databaseUrl) {
     try {
       db = new DatabaseClient(config.databaseUrl, logger);
@@ -174,6 +181,8 @@ async function initializeApp(): Promise<void> {
   } else {
     logger.info('DATABASE_URL not configured, using file-based storage');
   }
+
+  startAuditRetentionScheduler();
 }
 
 const cache = new HybridCache<unknown>(logger, {
@@ -285,6 +294,8 @@ async function startServer(): Promise<void> {
 
   const shutdown = () => {
     logger.info('Shutting down API server...');
+    stopAuditRetentionScheduler();
+    webhookService.stopRefresh();
     wss.stop();
     if (archival) archival.stop();
     if (dbHealthMonitor) dbHealthMonitor.stop();

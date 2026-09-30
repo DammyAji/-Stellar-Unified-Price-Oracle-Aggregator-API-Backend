@@ -6,6 +6,8 @@ import type { ApiPrice } from '@stellar-oracle/types';
 import { HybridCache } from './cache';
 import { cacheHitTotal, cacheMissTotal, lastPriceTimestamp, priceQueriesTotal } from '../observability/metrics';
 import { v2Ok, v2Fail } from '../infrastructure/response';
+import { sendError } from '../infrastructure/error';
+import { apiKeyManager } from '../governance/api-key-manager';
 
 type PriceConfidence = 'high' | 'medium' | 'low';
 
@@ -302,7 +304,12 @@ router.get('/history/:asset', async (req: Request, res: Response) => {
   }
   cacheMissTotal.inc();
 
-  const history = await readPriceHistory(asset.toUpperCase(), from, to, limit);
+  let history: Awaited<ReturnType<typeof readPriceHistory>>;
+  try {
+    history = await readPriceHistory(asset.toUpperCase(), from, to, limit);
+  } catch (err) {
+    return sendError(res, err, { path: req.path, method: req.method, requestId: req.requestId });
+  }
   const response = {
     asset: asset.toUpperCase(),
     from: from || null,
@@ -346,7 +353,11 @@ router.get('/health/ready', async (_req: Request, res: Response) => {
   const ready = prices.length > 0;
   res.status(ready ? 200 : 503).json({
     meta: { version: '2', success: ready },
-    data: { status: ready ? 'ready' : 'not_ready', assetsTracked: prices.length },
+    data: {
+      status: ready ? 'ready' : 'not_ready',
+      assetsTracked: prices.length,
+      keyStore: apiKeyManager.getBootstrapReport().health,
+    },
   });
 });
 

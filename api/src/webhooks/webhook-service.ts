@@ -142,6 +142,7 @@ class WebhookService {
       failureCount: 0,
     };
     this.webhooks.set(webhook.id, webhook);
+    this.persist(webhook);
 
     // Persist webhook secret to Vault asynchronously
     this.persistWebhookToVault(webhook).catch((err) => {
@@ -198,15 +199,45 @@ class WebhookService {
     }
   }
 
-  deliveries(webhookId?: string): WebhookDeliveryLog[] {
-    return webhookId
-      ? this.deliveryLog.filter((d) => d.webhookId === webhookId)
-      : this.deliveryLog;
+  /**
+   * Durable, per-webhook delivery history. Reads go to the shared store so a
+   * consumer sees the full retention window, not a process-local ring; the
+   * ring is only a fallback when the store is unreachable.
+   */
+  async deliveries(webhookId?: string, query: Omit<DeliveryQuery, 'webhookId'> = {}): Promise<WebhookDeliveryLog[]> {
+    try {
+      return await this.store.listDeliveries({ ...query, webhookId });
+    } catch (err) {
+      logger.warn('Webhook delivery store unreachable; serving in-memory history', err);
+      const ring = webhookId
+        ? this.deliveryRing.filter((d) => d.webhookId === webhookId)
+        : [...this.deliveryRing];
+      const since = query.since;
+      const filtered = since === undefined ? ring : ring.filter((d) => d.timestamp >= since);
+      const limit = query.limit;
+      if (limit !== undefined && filtered.length > limit) {
+        return filtered.slice(filtered.length - limit);
+      }
+      return filtered;
+    }
   }
 
-  private logDelivery(entry: WebhookDeliveryLog): void {
-    this.deliveryLog.push(entry);
-    if (this.deliveryLog.length > this.maxLogEntries) this.deliveryLog.shift();
+  async listDeadLetters(apiKeyPrefix?: string): Promise<DeadLetterEntry[]> {
+    try {
+      return await this.store.listDeadLetters(apiKeyPrefix);
+    } catch (err) {
+      logger.warn('Webhook dead-letter store unreachable', err);
+      return [];
+    }
+  }
+
+  async getDeadLetter(id: string): Promise<DeadLetterEntry | undefined> {
+    try {
+      return await this.store.getDeadLetter(id);
+    } catch (err) {
+      logger.warn('Webhook dead-letter store unreachable', err);
+      return undefined;
+    }
   }
 
   /**
@@ -228,8 +259,8 @@ class WebhookService {
   }
 
   /**
-   * Delivers a payload with exponential backoff retry. Failures are logged
-   * but never throw, since this runs from background price-update fan-out.
+   * Clears all registrations and durable webhook state. Used by tests for
+   * isolation and available to operators who need to wipe webhook state.
    */
   async deliver(webhook: WebhookRegistration, payload: Record<string, unknown>): Promise<void> {
     const body = buildWebhookBody(webhook.id, payload);
@@ -503,4 +534,5 @@ class WebhookService {
   }
 }
 
+export { WebhookService };
 export const webhookService = new WebhookService();

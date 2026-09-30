@@ -24,6 +24,7 @@ export enum ErrorCode {
   INVALID_TIMESTAMP = 'INVALID_TIMESTAMP',
   WEBSOCKET_ERROR = 'WEBSOCKET_ERROR',
   VALIDATION_ERROR = 'VALIDATION_ERROR',
+  DATA_INTEGRITY_ERROR = 'DATA_INTEGRITY_ERROR',
 }
 
 export interface ErrorDetails {
@@ -175,6 +176,13 @@ export const ERROR_CATALOG: Record<ErrorCode, ErrorDetails> = {
     title: 'Validation Error',
     description: 'One or more validation errors occurred',
     type: 'https://api.stellar-oracle.com/errors/validation-error',
+  },
+  [ErrorCode.DATA_INTEGRITY_ERROR]: {
+    code: ErrorCode.DATA_INTEGRITY_ERROR,
+    status: 500,
+    title: 'Data Integrity Error',
+    description: 'Stored data exists but could not be read, decrypted or parsed',
+    type: 'https://api.stellar-oracle.com/errors/data-integrity-error',
   },
 };
 

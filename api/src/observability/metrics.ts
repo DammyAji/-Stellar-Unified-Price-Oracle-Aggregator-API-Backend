@@ -288,6 +288,48 @@ export const pipelineStageLatencyMs = new client.Histogram({
 });
 register.registerMetric(pipelineStageLatencyMs);
 
+export const historyFileReadFailuresTotal = new client.Counter({
+  name: 'api_history_file_read_failures_total',
+  help: 'Total history file read failures by reason (unreadable, undecryptable, malformed)',
+  labelNames: ['asset', 'reason'],
+});
+register.registerMetric(historyFileReadFailuresTotal);
+
+export const auditAppendsTotal = new client.Counter({
+  name: 'audit_log_appends_total',
+  help: 'Total audit log append attempts by outcome',
+  labelNames: ['status'],
+});
+register.registerMetric(auditAppendsTotal);
+
+export const auditAppendDuration = new client.Histogram({
+  name: 'audit_log_append_duration_seconds',
+  help: 'Wall-clock cost of appending a single audit entry (issue #599 measured this before and after)',
+  labelNames: ['status'],
+  buckets: [0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1],
+});
+register.registerMetric(auditAppendDuration);
+
+export const auditRetentionRunsTotal = new client.Counter({
+  name: 'audit_retention_runs_total',
+  help: 'Total audit retention sweeps by outcome (completed, skipped, failed)',
+  labelNames: ['status'],
+});
+register.registerMetric(auditRetentionRunsTotal);
+
+export const auditRetentionFailuresTotal = new client.Counter({
+  name: 'audit_retention_failures_total',
+  help: 'Total audit retention sweeps that could not run, by failure reason',
+  labelNames: ['reason'],
+});
+register.registerMetric(auditRetentionFailuresTotal);
+
+export const auditEntriesArchivedTotal = new client.Counter({
+  name: 'audit_entries_archived_total',
+  help: 'Total audit entries moved out of the active log into the archive',
+});
+register.registerMetric(auditEntriesArchivedTotal);
+
 export function metricsMiddleware(req: Request, res: Response, next: NextFunction): void {
   const end = httpRequestDuration.startTimer();
   res.on('finish', () => {

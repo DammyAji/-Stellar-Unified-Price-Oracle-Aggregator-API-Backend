@@ -231,14 +231,15 @@ describe('WebhookService', () => {
     expect(webhookService.get(wh.id)).toBeUndefined();
   });
 
-  it('returns delivery logs', () => {
+  it('returns delivery logs', async () => {
     const wh = webhookService.register('https://example.com/deliveries', 'key-5', {
       type: 'threshold',
       asset: 'XLM',
       value: 5,
     });
-    const logs = webhookService.deliveries();
+    const logs = await webhookService.deliveries();
     expect(Array.isArray(logs)).toBe(true);
+    expect(wh.id).toBeDefined();
   });
 
   it('handles price updates without throwing', async () => {

@@ -109,7 +109,14 @@ async function poll(): Promise<AggregatedPrice[]> {
           price.timestamp,
         );
       } else {
-        appendHistoricalPrice(price.asset, price.price.toString(), price.decimals, price.source, price.timestamp);
+        try {
+          appendHistoricalPrice(price.asset, price.price.toString(), price.decimals, price.source, price.timestamp);
+        } catch (err) {
+          logger.error('Failed to append historical price for asset', {
+            asset: price.asset,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
 

@@ -4,11 +4,11 @@ This policy defines how operational audit logs are retained and verified.
 
 ## Retention policy
 
-The API enforces a configurable retention window for audit logs. The default operational policy is 90 days; the compliance dashboard keeps a longer archive window for supporting evidence and subject-access workflows.
+The default operational policy is 90 days in active storage; the compliance
+dashboard keeps a longer archive window for supporting evidence and
+subject-access workflows.
 
-For the production compliance configuration, the system uses the following default retention logic:
-
-- audit logs: 90 days in active storage
+- audit logs: 90 days in active storage, then archived
 - archive retention: 3 years for governance and incident evidence
 - debug and raw payload logs: 90 days, then deletion
 
@@ -100,4 +100,9 @@ Alerting is metric-based:
 3. Treat the first invalid index as a tamper indicator and quarantine the file
    for forensic review.
 
-This workflow can be used to satisfy audit and incident-review requirements without introducing a new operational dependency on an external attestation service.
+| Variable | Default | Purpose |
+|---|---|---|
+| `AUDIT_RETENTION_DAYS` | `90` | Age after which an entry leaves the active log. `0` disables retention. |
+| `AUDIT_RETENTION_SWEEP_MS` | `3600000` | Interval between scheduled sweeps. |
+| `AUDIT_LOG_DIR` | `logs` | Directory holding `audit.log`, `audit-archive/` and the retention lock. |
+| `AUDIT_SECRET` | built-in default | HMAC key for the tamper-evident chain; must be set in production. |

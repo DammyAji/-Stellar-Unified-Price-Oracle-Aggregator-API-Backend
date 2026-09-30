@@ -27,7 +27,7 @@ describe('ApiKeyManager - Key Generation', () => {
         free: 'sk_free_',
         pro: 'sk_pro_',
         enterprise: 'sk_enterprise_',
-        admin: 'sk_admin_',
+        admin: process.env.ADMIN_KEY_PREFIX || 'admin_',
       };
 
       for (const tier of tiers) {
@@ -438,7 +438,7 @@ describe('ApiKeyManager - Key Rotation', () => {
     it('should produce a key with correct prefix for tier', async () => {
       const { keyHash } = mgr.generateKey(100, 'prefix', 'admin', 'admin');
       const rotated = mgr.rotateKey(keyHash)!;
-      expect(rotated.key).toMatch(/^sk_admin_[0-9a-f]{64}$/);
+      expect(rotated.key).toMatch(new RegExp(`^${process.env.ADMIN_KEY_PREFIX || 'admin_'}[0-9a-f]{64}$`));
     });
   });
 });

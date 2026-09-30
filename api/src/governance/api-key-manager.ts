@@ -545,7 +545,7 @@ export class ApiKeyManager {
   }
 
   private createKey(tier: KeyTier = 'free'): string {
-    const prefix = tier === 'admin' ? 'sk_admin_' : `sk_${tier}_`;
+    const prefix = tier === 'admin' ? adminKeyPrefix() : `sk_${tier}_`;
     return prefix + crypto.randomBytes(32).toString('hex');
   }
 
@@ -585,11 +585,14 @@ export class ApiKeyManager {
 
   private loadKeysFromEnv(): void {
     const envKeys = process.env.API_KEYS ? decryptSecret(process.env.API_KEYS) : undefined;
-    if (!envKeys) {
-      if (this.keys.size === 0) {
-        const adminKey = this.generateKey(TIER_RATE_LIMITS.admin, 'Default admin key', 'admin', 'admin');
-        logger.info(`Generated default admin key: ${adminKey.key}`);
-        logger.info('Store this key securely. It will not be shown again.');
+    if (!envKeys || !envKeys.trim()) {
+      if (this.keys.size === 0 && allowEphemeralAdminKey()) {
+        this.generateEphemeralAdminKey();
+      } else if (this.keys.size === 0) {
+        logger.warn(
+          'API_KEYS is not configured and ALLOW_EPHEMERAL_ADMIN_KEY is not set; ' +
+          'the key store is empty. See docs/KEY_MANAGEMENT.md#api-key-bootstrap.',
+        );
       }
       return;
     }
@@ -624,7 +627,8 @@ export class ApiKeyManager {
         }
       }
 
-      logger.info(`Loaded ${this.keys.size} API keys from environment`);
+      this.envKeyCount = this.keys.size;
+      logger.info(`Loaded ${this.envKeyCount} API keys from environment`);
     } catch (err) {
       logger.error('Failed to load API keys from environment', err);
     }
@@ -632,3 +636,35 @@ export class ApiKeyManager {
 }
 
 export const apiKeyManager = new ApiKeyManager();
+
+/**
+ * Startup key-source check (issue #592). Reports how many keys were loaded
+ * from where and refuses to start in production when no key source exists.
+ * Call after the Vault load so store-backed keys are counted.
+ */
+export function bootstrapApiKeyStore(manager: ApiKeyManager = apiKeyManager): KeyBootstrapReport {
+  const report = manager.getBootstrapReport();
+
+  if (report.count === 0) {
+    if (isProduction()) {
+      throw new MissingKeySourceError(
+        'No API key source configured: API_KEYS is unset or empty and the Vault key store did not ' +
+        'supply any keys. Refusing to start in production. Set API_KEYS (format ' +
+        '`key:rateLimit:description:tier:role`, see .env.example) or seed the Vault store. For local ' +
+        'development and tests only, set ALLOW_EPHEMERAL_ADMIN_KEY=true. ' +
+        'See docs/KEY_MANAGEMENT.md#api-key-bootstrap.',
+      );
+    }
+    logger.warn(
+      'API key bootstrap: source=none count=0 health=empty. No admin key exists; every admin route ' +
+      'will reject requests. See docs/KEY_MANAGEMENT.md#api-key-bootstrap.',
+    );
+    return report;
+  }
+
+  logger.info(
+    `API key bootstrap: source=${report.source} count=${report.count} health=${report.health}` +
+    (report.ephemeral ? ' (ephemeral key present, not durable)' : ''),
+  );
+  return report;
+}
