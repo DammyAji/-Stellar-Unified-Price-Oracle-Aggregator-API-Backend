@@ -45,6 +45,7 @@ import { getVaultClient } from '@stellar-oracle/vault-client';
 import { apiKeyManager, bootstrapApiKeyStore } from './governance/api-key-manager';
 import { startAuditRetentionScheduler, stopAuditRetentionScheduler } from './governance/audit-logger';
 import webhooksRoutes from './webhooks/webhooks';
+import { webhookService } from './webhooks/webhook-service';
 import graphqlRoutes from './graphql';
 import releaseNotesRoutes from './release-notes/router';
 
@@ -87,6 +88,10 @@ async function initializeApp(): Promise<void> {
 
   // Fail closed in production when no key source exists (issue #592).
   bootstrapApiKeyStore();
+
+  // Load durable webhook registrations from the shared store (issue #601).
+  await webhookService.load();
+  webhookService.startRefresh();
 
   if (config.databaseUrl) {
     try {
@@ -259,6 +264,7 @@ async function startServer(): Promise<void> {
   const shutdown = () => {
     logger.info('Shutting down API server...');
     stopAuditRetentionScheduler();
+    webhookService.stopRefresh();
     wss.stop();
     if (archival) archival.stop();
     if (dbHealthMonitor) dbHealthMonitor.stop();

@@ -366,7 +366,61 @@ const options: swaggerJsdoc.Options = {
         get: {
           tags: ['Webhooks'],
           summary: 'Webhook delivery log',
+          description:
+            'Durable, per-webhook delivery history retained for WEBHOOK_DELIVERY_RETENTION_DAYS ' +
+            '(default 30). Deliveries are at-least-once and ordered per webhook: attempts for a ' +
+            'given webhook are sequential, so two triggers never deliver out of order, while ' +
+            'different webhooks have no ordering guarantee. Consumers must deduplicate on ' +
+            'webhookId + payload timestamp.',
+          parameters: [
+            { name: 'limit', in: 'query', schema: { type: 'integer' }, description: 'Newest N entries' },
+            { name: 'since', in: 'query', schema: { type: 'integer' }, description: 'Epoch ms lower bound' },
+          ],
           responses: { 200: { description: 'Delivery log entries' } },
+        },
+      },
+      '/api/v1/webhooks/dead-letters': {
+        get: {
+          tags: ['Webhooks'],
+          summary: 'List dead-lettered deliveries',
+          description:
+            'Payloads that exhausted their retry budget, with the trigger context and failure ' +
+            'reason. Scoped to the calling API key.',
+          responses: { 200: { description: 'Dead-letter entries' } },
+        },
+      },
+      '/api/v1/webhooks/dead-letters/{id}': {
+        get: {
+          tags: ['Webhooks'],
+          summary: 'Get a dead-lettered delivery',
+          responses: { 200: { description: 'Dead-letter entry' }, 404: { description: 'Not found' } },
+        },
+      },
+      '/api/v1/webhooks/dead-letters/{id}/replay': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Replay a dead-lettered delivery',
+          description:
+            'Requires an idempotency key (body idempotencyKey or Idempotency-Key header). A ' +
+            'successful replay resolves the entry, so replaying again returns status ' +
+            '"duplicate" and never delivers a second time.',
+          requestBody: {
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['idempotencyKey'],
+                  properties: { idempotencyKey: { type: 'string', example: 'req-01H...' } },
+                },
+              },
+            },
+          },
+          responses: {
+            200: { description: 'Replayed or duplicate' },
+            400: { description: 'Missing idempotency key' },
+            404: { description: 'Not found' },
+            502: { description: 'Replay delivery failed' },
+          },
         },
       },
       '/api/v1/audit': {
@@ -456,6 +510,28 @@ const options: swaggerJsdoc.Options = {
                 value: { type: 'number', example: 1.5 },
               },
             },
+          },
+        },
+        WebhookDeadLetter: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', format: 'uuid' },
+            webhookId: { type: 'string', format: 'uuid' },
+            url: { type: 'string' },
+            payload: { type: 'object', additionalProperties: true },
+            trigger: { type: 'object', additionalProperties: true },
+            attempts: { type: 'integer', example: 5 },
+            failure: { type: 'string', example: 'HTTP 503' },
+            createdAt: { type: 'integer', example: 1719000000000 },
+            resolvedAt: { type: 'integer', nullable: true, example: 1719000600000 },
+            replayId: { type: 'string', nullable: true },
+          },
+        },
+        WebhookReplayResult: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['replayed', 'duplicate', 'in-flight', 'failed', 'missing'] },
+            entry: { $ref: '#/components/schemas/WebhookDeadLetter' },
           },
         },
         AssetPrice: {
