@@ -229,6 +229,13 @@ export const pipelineStageLatencyMs = new client.Histogram({
 });
 register.registerMetric(pipelineStageLatencyMs);
 
+export const historyFileReadFailuresTotal = new client.Counter({
+  name: 'api_history_file_read_failures_total',
+  help: 'Total history file read failures by reason (unreadable, undecryptable, malformed)',
+  labelNames: ['asset', 'reason'],
+});
+register.registerMetric(historyFileReadFailuresTotal);
+
 export function metricsMiddleware(req: Request, res: Response, next: NextFunction): void {
   const end = httpRequestDuration.startTimer();
   res.on('finish', () => {

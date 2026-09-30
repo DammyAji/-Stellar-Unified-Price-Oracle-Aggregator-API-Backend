@@ -13,18 +13,24 @@ import * as path from 'path';
 
 vi.mock('fs', () => {
   const mockFiles = new Map<string, string>();
-  return {
-    default: {
-      existsSync: vi.fn((p: string) => mockFiles.has(p)),
-      mkdirSync: vi.fn(),
-      writeFileSync: vi.fn((p: string, data: string) => { mockFiles.set(p, data); }),
-      readFileSync: vi.fn((p: string) => mockFiles.get(p) || '[]'),
-    },
+  const renameSync = vi.fn((from: string, to: string) => {
+    const contents = mockFiles.get(from);
+    mockFiles.delete(from);
+    mockFiles.set(to, contents as string);
+  });
+  const api = {
     existsSync: vi.fn((p: string) => mockFiles.has(p)),
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn((p: string, data: string) => { mockFiles.set(p, data); }),
     readFileSync: vi.fn((p: string) => mockFiles.get(p) || '[]'),
+    renameSync,
+    unlinkSync: vi.fn((p: string) => { mockFiles.delete(p); }),
+    readdirSync: vi.fn(() => []),
+    openSync: vi.fn(() => { throw new Error('openSync is not supported by the fs mock'); }),
+    fsyncSync: vi.fn(),
+    closeSync: vi.fn(),
   };
+  return { ...api, default: api };
 });
 
 vi.mock('../src/infrastructure/http-client', () => ({

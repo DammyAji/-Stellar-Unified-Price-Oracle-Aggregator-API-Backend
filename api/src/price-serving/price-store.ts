@@ -4,12 +4,50 @@ import type { ApiPrice, HistoricalPriceEntry } from '@stellar-oracle/types';
 import { DatabaseClient, type PriceHistory } from '../infrastructure/database';
 import { decrypt, encrypt, isEncrypted, isEncryptionConfigured } from '../governance/crypto';
 import { decodeCursor } from './pagination';
+import { AppError } from '../infrastructure/app-error';
+import { ErrorCode } from '../infrastructure/catalog';
+import { logger } from '../observability/logger';
+import { historyFileReadFailuresTotal } from '../observability/metrics';
 
 const DATA_DIR = path.resolve(__dirname, '../../data');
 const HISTORY_FILE = (asset: string) => path.join(DATA_DIR, `history-${asset.toLowerCase()}.json`);
 let db: DatabaseClient | null = null;
 
 export const SANDBOX_ASSETS = ['XLM', 'USDC', 'BTC', 'ETH', 'USDT'] as const;
+
+export type HistoryFailureReason = 'unreadable' | 'undecryptable' | 'malformed';
+
+function describeCause(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function classifyFailure(err: unknown): HistoryFailureReason {
+  const message = describeCause(err);
+  if (/No encryption key available|authentication tag|Malformed encrypted payload|Unsupported encryption/i.test(message)) {
+    return 'undecryptable';
+  }
+  if (err instanceof SyntaxError) return 'malformed';
+  return 'unreadable';
+}
+
+/** Issue #589 — surfaces a stored-but-unreadable history file as a typed fault. */
+function toHistoryReadError(filePath: string, asset: string, err: unknown): AppError {
+  const reason = classifyFailure(err);
+  historyFileReadFailuresTotal.inc({ asset: asset.toLowerCase(), reason });
+  logger.error('History file read failure', {
+    asset,
+    reason,
+    filePath,
+    message: describeCause(err),
+    severity: 'error',
+    alert: 'history-file-integrity',
+  });
+  return new AppError(
+    ErrorCode.DATA_INTEGRITY_ERROR,
+    `History file for ${asset} is ${reason}: ${describeCause(err)}`,
+    { asset, reason, filePath },
+  );
+}
 
 /** Replace file-backed data with deterministic, recent fixtures for sandbox resets. */
 export function resetSandboxData(now = Math.floor(Date.now() / 1000)): void {
@@ -30,9 +68,13 @@ export function resetSandboxData(now = Math.floor(Date.now() / 1000)): void {
 /** Read and parse a history file, transparently decrypting if encrypted at rest. */
 function readHistoryFile(filePath: string): unknown[] {
   const raw = fs.readFileSync(filePath, 'utf-8');
-  if (!raw) return [];
+  if (!raw.trim()) return [];
   const contents = isEncrypted(raw) ? decrypt(raw) : raw;
-  return JSON.parse(contents) as unknown[];
+  const parsed = JSON.parse(contents) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new SyntaxError('history file does not contain a JSON array');
+  }
+  return parsed;
 }
 
 export function setDatabase(database: DatabaseClient | null): void {
@@ -75,7 +117,16 @@ export async function readAssetPrices(): Promise<ApiPrice[]> {
           timestamp: latest.timestamp as number,
         });
       }
-    } catch { /* skip corrupt files */ }
+    } catch (err) {
+      logger.error('Skipping unreadable history file while listing assets', {
+        file,
+        reason: classifyFailure(err),
+        message: describeCause(err),
+        severity: 'error',
+        alert: 'history-file-integrity',
+      });
+      historyFileReadFailuresTotal.inc({ asset: file, reason: classifyFailure(err) });
+    }
   }
 
   return Array.from(assets.values());
@@ -111,8 +162,8 @@ export async function readPriceHistory(
     if (from) history = history.filter((h) => h.timestamp >= from);
     if (to) history = history.filter((h) => h.timestamp <= to);
     return history.slice(-limit);
-  } catch {
-    return [];
+  } catch (err) {
+    throw toHistoryReadError(filePath, asset, err);
   }
 }
 
@@ -162,7 +213,7 @@ export async function readPriceHistoryCursor(
     if (afterTs !== undefined) history = history.filter((h) => h.timestamp > afterTs!);
     if (to !== undefined) history = history.filter((h) => h.timestamp <= to);
     return history.slice(0, limit + 1);
-  } catch {
-    return [];
+  } catch (err) {
+    throw toHistoryReadError(filePath, asset, err);
   }
 }

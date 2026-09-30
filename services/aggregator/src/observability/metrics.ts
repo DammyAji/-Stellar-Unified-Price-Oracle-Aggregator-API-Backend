@@ -272,5 +272,27 @@ export const retryQueueOrphanedRetriesTotal = new client.Counter({
   registers: [register],
 });
 
+// Issue #589 — History file integrity
+export const historyFileReadFailuresTotal = new client.Counter({
+  name: 'history_file_read_failures_total',
+  help: 'Total history file read failures by asset and reason (unreadable, undecryptable, malformed)',
+  labelNames: ['asset', 'reason'],
+  registers: [register],
+});
+
+export const historyFileQuarantinesTotal = new client.Counter({
+  name: 'history_file_quarantines_total',
+  help: 'Total history files moved to data/quarantine after a parse or decrypt failure',
+  labelNames: ['asset', 'reason'],
+  registers: [register],
+});
+
+export const historyFileWriteFailuresTotal = new client.Counter({
+  name: 'history_file_write_failures_total',
+  help: 'Total history file append failures by asset and reason',
+  labelNames: ['asset', 'reason'],
+  registers: [register],
+});
+
 export { register };
 

@@ -51,6 +51,7 @@ vi.mock('../src/observability/metrics', () => {
     oracleSourceRequestsTotal: c(), oracleSourceSlaBreaches: c(),
     oracleApiCallsTotal: c(), oracleApiCostTotal: c(),
     oracleApiBudgetUtilization: g(),
+    historyFileReadFailuresTotal: c(),
     metricsHandler: (_r: any, res: any) => res.send(''),
     metricsMiddleware: (_r: any, _rs: any, next: any) => next(),
   };
