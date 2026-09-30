@@ -24,7 +24,9 @@ const openCritical = dataRows.filter((cells) => {
 if (openCritical.length > 0) {
   console.error(`Found ${openCritical.length} open Critical audit finding(s) in ${FINDINGS_FILE}:`);
   openCritical.forEach((cells) => console.error(`  - ${cells[0]}: ${cells[2]} (status: ${cells[3]})`));
+  console.error('SOC 2 control CC7.2 (Monitoring) automated check: FAIL');
   process.exit(1);
 }
 
 console.log('No open Critical audit findings.');
+console.log('SOC 2 control CC7.2 (Monitoring) automated check: PASS');

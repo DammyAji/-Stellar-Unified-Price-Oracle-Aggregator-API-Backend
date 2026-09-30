@@ -75,7 +75,7 @@ async function callAggregator(req) {
   const span = trace.getActiveSpan();
   const traceId = span?.spanContext().traceId;
 
-  const response = await axios.get('http://localhost:4000/prices', {
+  const response = await axios.get('http://localhost:3000/prices', {
     headers: {
       'x-trace-id': traceId,
       'x-request-id': req.requestId,

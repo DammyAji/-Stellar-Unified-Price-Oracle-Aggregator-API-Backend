@@ -142,79 +142,69 @@ Istio mesh in `k8s/istio/`, Terraform in `infrastructure/terraform/`.
   check); configure the k8s probes (`k8s/base/` deployments) and HPA
   (`k8s/hpa.yaml`, `k8s/custom-metrics-hpa.yaml`) against them.
 
-## 7. Backup/restore procedures
+## 7. Maintenance-capacity guarantees (PDBs & rollouts)
+
+A voluntary disruption — node drain, cluster upgrade, autoscaler scale-down —
+may evict every replica of a workload unless a `PodDisruptionBudget` caps the
+number of simultaneous evictions.  For a price oracle consumed by DeFi
+protocols, a drain-induced total outage is a real availability event, so every
+stateless workload ships with a PDB and a capacity-preserving rollout strategy.
+
+### PDB minimum math
+
+The API and aggregator each run at **2 replicas** and the HPA floor is
+`minReplicas: 2`.  The SLOs in `monitoring/slo.yml` assume availability during
+maintenance, so we must always keep **at least one** replica serving:
+
+- `minAvailable: 1` with `replicas: 2` permits exactly one voluntary eviction
+  at a time — a drain takes one pod, the other keeps serving, and the evicted
+  pod is rescheduled before the next eviction is allowed.
+- `minAvailable: 2` with `replicas: 2` would forbid **all** voluntary
+disruptions (no drain could ever complete) — a different failure mode, and
+  the reason the PDB minimum must stay strictly below the HPA minimum.
+
+**Compatibility rule:** `PDB.minAvailable < HPA.minReplicas`.  With
+`minReplicas: 2` the only valid value is `minAvailable: 1`.  If the HPA floor
+is ever raised to 3, the PDB may be raised to 2 — never to the HPA floor.
+
+### Rolling-update strategy
+
+Each Deployment sets an explicit strategy so a rollout cannot reduce capacity
+to zero:
+
+- `strategy.rollingUpdate.maxUnavailable: 0` — never take a pod out of
+  service before its replacement is Ready.
+- `strategy.rollingUpdate.maxSurge: 1` — bring one extra pod up first, then
+  retire the old one.
+
+With `replicas: 2` this keeps 2 pods serving throughout the rollout (surge to
+3, then settle back to 2).  Verify the strategy against the replica count and
+the HPA minimum whenever either changes: `maxUnavailable` must be `0` while
+`replicas == HPA.minReplicas`, otherwise a rollout can dip below the PDB
+minimum.
+
+### Blue-green pair
+
+The blue-green deployments (`k8s/overlays/*/blue-green/`) are a pair of
+Deployments behind a single Service.  Each colour gets its own PDB with the
+same `minAvailable: 1` math, so a drain during a cutover cannot evict both the
+active and the standby colour at once.  The failover policy resources
+(`k8s/base/failover-policy.yaml`) reference the Service, not the individual
+Deployments, so they inherit the PDB guarantee — confirm the failover policy
+still points at the Service after any blue-green change.
+
+### CI enforcement
+
+`scripts/validate-k8s.sh` (run in `.github/workflows/ci.yml`) fails the build
+when a Deployment has no matching `PodDisruptionBudget` in the same overlay,
+so a new workload cannot ship without one.  The check matches PDBs to
+Deployments by `spec.selector.matchLabels`, the same selector the Deployment
+uses for its pods.
+
+## 8. Backup/restore procedures
 
 **Backups** (issue #43):
 
-- The API takes periodic encrypted backups of price history
-  (`api/src/infrastructure/backup.ts`) — gzip-compressed and
-  **AES-256-GCM encrypted** (same `enc:` scheme as secrets).  Metrics:
-  `backup_total{result}`, `backup_size_bytes`, `backup_duration_ms`.
-- For the database, snapshot at the storage layer (RDS automated snapshots
-  + `pg_dump` to object storage for the TimescaleDB data).  Keep encrypted
-  copies off-cluster.
-- Secrets are re-creatable: `scripts/rotate-secrets.sh` can regenerate every
-  category; never rely on a single `.env` copy.
+- The API takes periodic encrypted backups of p
 
-**Restore:**
-
-1. **Prices/history:** restore the latest encrypted backup through the API's
-   restore path (verify decryption with the same `ENCRYPTION_KEY` /
-   `ENCRYPTION_KEY_PREVIOUS` used at backup time).
-2. **Database:** restore the `pg_dump` (or RDS snapshot) into a fresh
-   instance, point `DATABASE_URL` at it, and re-run the TimescaleDB setup
-   (`USE_TIMESCALEDB=true`).
-3. **Contract state:** the Soroban contract is the source of truth on-chain;
-   if the database is fully lost, prices re-populate from the contract on the
-   next aggregation cycle — treat the DB as a cache/history store, not the
-   feed's authority.
-4. **Validate:** check `/health`, spot-check a few assets via the API, and
-   confirm `onchain_price_staleness_seconds` is healthy before declaring the
-   restore complete.  See `docs/runbooks/disaster-recovery.md`.
-
-## 8. Operating the platform
-
-- **Deploy a release:** build images, then
-  `./scripts/deploy-k8s.sh <dev|staging|prod> <api-image> <aggregator-image>`
-  (Kustomize + `kubectl apply --server-side`).  For a zero-downtime web cutover
-  use `./scripts/deploy-blue-green.sh <image-tag>` (smoke-tests the health URL
-  before/after cutover).
-- **Multi-region:** production overlays exist for `prod-us-east-1` and
-  `prod-eu-west-1` (active-active; see `k8s/overlays/prod-*` and
-  `docs/active-active-multi-region.md`).
-- **Scaling:** HPA manifests scale API/aggregator on CPU and custom metrics
-  (rate, staleness).
-- **Chaos validation:** `scripts/chaos/install-chaos-mesh.sh` +
-  `k8s/chaos/` experiments validate resilience in staging before major
-  changes (see `k8s/README.md`).
-- **Incident response:** use the runbooks in `docs/runbooks/` — price feed
-  stale, oracle source down, high error rate, contract failures, database
-  issues, disaster recovery — and the post-mortem template.
-
-## 9. Pre-flight checklist (production)
-
-- [ ] `npm ci` clean; all test suites green (api, aggregator, contract).
-- [ ] `.env` created from `.env.example`; secrets stored as `enc:v1:…`.
-- [ ] Database provisioned (private subnet / restricted SG), migrations run,
-      `DATABASE_URL` reachable from API pods.
-- [ ] Contract deployed behind the proxy; `CONTRACT_ID` set;
-      `get_api_version()` recorded; verification report generated.
-- [ ] Admin API keys created and rotated into Vault; tier limits reviewed.
-- [ ] TLS terminates at the gateway with a valid certificate; HTTPS only.
-- [ ] Prometheus scraping both services; Grafana dashboard imported; SLO
-      alerts configured; Jaeger receiving traces.
-- [ ] Backups verified with a restore drill; retention set
-      (`HISTORY_RETENTION_DAYS`).
-- [ ] Istio mTLS enabled (or equivalent network policy — see
-      `k8s/base/networkpolicy.yaml`).
-- [ ] `docs/runbooks/*` reviewed by on-call; on-call has access to the
-      encrypted secrets and rotation scripts.
-
-## Related documents
-
-- [`DEPLOY.md`](../DEPLOY.md) — quick start (local, Docker, Fly/Railway)
-- [`docs/runbooks/README.md`](./runbooks/README.md) — incident runbooks
-- [`docs/security/secret-rotation.md`](./security/secret-rotation.md) — secret rotation runbook
-- [`docs/SECURITY_ARCHITECTURE.md`](./SECURITY_ARCHITECTURE.md) — security controls & threat model
-- [`docs/CANARY_DEPLOYMENTS.md`](./CANARY_DEPLOYMENTS.md) — staged contract upgrades
-- [`docs/CONTRACT_UPGRADE_GOVERNANCE.md`](./CONTRACT_UPGRADE_GOVERNANCE.md) — upgrade quorum & multisig
+/* … truncated 3920 chars — edit only what you need near the top … */

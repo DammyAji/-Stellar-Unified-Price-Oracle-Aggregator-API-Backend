@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
-import { apiKeyManager, TIER_RATE_LIMITS, type KeyTier } from './api-key-manager';
+import { apiKeyManager, TIER_RATE_LIMITS, type KeyTier, type GeneratedApiKey } from './api-key-manager';
+import { keyMutation } from './key-mutation';
 import { authMiddleware } from './auth';
 
 const router = Router();
@@ -17,14 +18,16 @@ router.get('/keys', (req: Request, res: Response) => {
   return res.json({ success: true, data: { ...key, keyPrefix: key.keyPrefix } });
 });
 
-router.post('/keys', (req: Request, res: Response) => {
+router.post('/keys', keyMutation(async (req: Request, res: Response) => {
   const { description, tier = 'free', role = 'viewer', scopes, rateLimitPerMin } = req.body ?? {};
   const resolvedTier = (tier ?? 'free') as KeyTier;
   const limit = typeof rateLimitPerMin === 'number' && rateLimitPerMin > 0
     ? rateLimitPerMin
     : TIER_RATE_LIMITS[resolvedTier];
 
-  const key = apiKeyManager.generateKey(limit, description, resolvedTier, role, Array.isArray(scopes) ? scopes : undefined);
+  const key = await apiKeyManager.transact(() =>
+    apiKeyManager.generateKey(limit, description, resolvedTier, role, Array.isArray(scopes) ? scopes : undefined),
+  );
 
   return res.status(201).json({
     success: true,
@@ -40,9 +43,9 @@ router.post('/keys', (req: Request, res: Response) => {
       createdAt: new Date(key.createdAt).toISOString(),
     },
   });
-});
+}));
 
-router.post('/keys/rotate', (req: Request, res: Response) => {
+router.post('/keys/rotate', keyMutation(async (req: Request, res: Response) => {
   const currentKeyHash = apiKeyManager.hashKey(req.apiKey!);
   const current = apiKeyManager.findByHash(currentKeyHash);
 
@@ -50,7 +53,7 @@ router.post('/keys/rotate', (req: Request, res: Response) => {
     return res.status(404).json({ success: false, error: { code: 'KEY_NOT_FOUND', message: 'API key not found' } });
   }
 
-  const rotated = apiKeyManager.rotateKey(currentKeyHash);
+  const rotated: GeneratedApiKey | null = await apiKeyManager.transact(() => apiKeyManager.rotateKey(currentKeyHash));
   if (!rotated) {
     return res.status(500).json({ success: false, error: { code: 'ROTATE_FAILED', message: 'Failed to rotate API key' } });
   }
@@ -67,9 +70,9 @@ router.post('/keys/rotate', (req: Request, res: Response) => {
       rateLimitPerMin: rotated.rateLimitPerMin,
     },
   });
-});
+}));
 
-router.post('/keys/revoke', (req: Request, res: Response) => {
+router.post('/keys/revoke', keyMutation(async (req: Request, res: Response) => {
   const currentKeyHash = apiKeyManager.hashKey(req.apiKey!);
   const current = apiKeyManager.findByHash(currentKeyHash);
 
@@ -77,8 +80,8 @@ router.post('/keys/revoke', (req: Request, res: Response) => {
     return res.status(404).json({ success: false, error: { code: 'KEY_NOT_FOUND', message: 'API key not found' } });
   }
 
-  apiKeyManager.revokeKey(currentKeyHash);
+  await apiKeyManager.transact(() => apiKeyManager.revokeKey(currentKeyHash));
   return res.json({ success: true, data: { keyHash: currentKeyHash, action: 'revoked' } });
-});
+}));
 
 export default router;

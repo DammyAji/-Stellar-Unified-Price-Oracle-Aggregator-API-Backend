@@ -97,16 +97,8 @@ resource "aws_cloudwatch_log_group" "aggregator" {
 
 resource "aws_security_group" "aggregator" {
   name        = "${var.project_name}-aggregator-sg"
-  description = "Aggregator service: internal ports 4000/4001/4002"
+  description = "Aggregator service: internal ports 4001/4002 (PORT+1, PORT+2)"
   vpc_id      = var.vpc_id
-
-  ingress {
-    description = "Aggregator REST health port"
-    from_port   = 4000
-    to_port     = 4000
-    protocol    = "tcp"
-    self        = true
-  }
 
   ingress {
     description = "Aggregator WebSocket port"
@@ -117,7 +109,7 @@ resource "aws_security_group" "aggregator" {
   }
 
   ingress {
-    description = "Aggregator metrics port"
+    description = "Aggregator health + metrics port"
     from_port   = 4002
     to_port     = 4002
     protocol    = "tcp"
@@ -151,7 +143,6 @@ resource "aws_ecs_task_definition" "aggregator" {
     essential = true
 
     portMappings = [
-      { containerPort = 4000, protocol = "tcp" },
       { containerPort = 4001, protocol = "tcp" },
       { containerPort = 4002, protocol = "tcp" }
     ]
@@ -177,7 +168,7 @@ resource "aws_ecs_task_definition" "aggregator" {
     }
 
     healthCheck = {
-      command     = ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      command     = ["CMD-SHELL", "wget -qO- http://localhost:4002/health || exit 1"]
       interval    = 30
       timeout     = 5
       retries     = 3

@@ -22,6 +22,7 @@ is verified, and *which threats it mitigates*.  All code references are to
 | 4 | WebSocket signing & upgrade protection | `api/src/governance/ws-signing.ts`, `api/src/infrastructure/csrf.ts`, `api/src/infrastructure/upgrade-guard.ts`, `api/src/infrastructure/server.ts` | WS auth/CSRF/signing suites |
 | 5 | Input sanitization | `api/src/governance/sanitization.ts` | sanitization suites |
 | 6 | Secrets management | `scripts/encrypt-secret.ts`, `scripts/rotate-secrets.sh`, `api/src/infrastructure/config.ts` (`decryptSecret`), `packages/vault-client` | `tests/encryption-at-rest.test.ts`, `docs/security/secret-rotation.md` |
+| 7 | HTTPS redirect & proxy trust | `api/src/infrastructure/https.ts`, `api/src/platform/trusted-proxy.ts` | `api/tests/middleware/https-redirect.test.ts` |
 
 ```
                           ┌─────────────────────────────┐
@@ -214,20 +215,29 @@ characters.
 long-lived-key compromise, DB/dump leaks (see §2), and unrotated credentials
 after an incident.
 
-## 7. Kubernetes workload hardening
+## 7. CORS allowlist
 
-**Where:** `k8s/base/api/deployment-stable.yaml`, `k8s/base/api/deployment-canary.yaml`, `k8s/base/aggregator/deployment.yaml`, `k8s/blue-green/*.yaml`, and `k8s/base/namespace.yaml` plus the overlay namespace manifests.
+**Where:** `api/src/governance/cors-manager.ts`, admin routes in
+`api/src/governance/admin.ts`, wired in `api/src/index.ts`.
 
-The repository applies Pod Security Admission in the `restricted` profile to the namespaces that run the API, aggregator, and support services. The decision is compatible with the application runtime because the Node-based images are intentionally run as a fixed non-root UID/GID (`1000:1000`), and the writable paths are mounted explicitly instead of leaving the root filesystem writable.
+- **Fail closed:** an empty allowlist denies every cross-origin request.
+  Development-only `CORS_ALLOW_ANY=true` opts in to reflecting every origin
+  **with credentials disabled**.
+- **Patterns:** exact `http(s)` origins, `*.example.com` (apex plus
+  any-depth subdomains), or the literal `null`. The bare `*` cannot be
+  stored because responses are sent with `credentials: true`.
+- **Shared store:** the allowlist lives in Vault at
+  `secret/data/cors/origins`, so all replicas converge (30 s refresh) and
+  changes survive restarts; `/tmp/cors-origins.json` is only a local cache.
+  Changes go through `POST`/`DELETE /admin/cors/origins` (admin role), are
+  rolled back if the shared-store write fails, are audited
+  (`cors.allowlist.change`, with before/after state), and emit a
+  `cors-allowlist-changed` domain event.
 
-- **Non-root execution:** `runAsNonRoot: true`, `runAsUser: 1000`, `runAsGroup: 1000`, `fsGroup: 1000`.
-- **Read-only root filesystem:** `readOnlyRootFilesystem: true` on each container.
-- **Privilege isolation:** `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, `seccompProfile.type: RuntimeDefault`.
-- **Writable paths:** `/tmp`, `/app/data`, and `/app/logs` are backed by `emptyDir` volumes. This matches the actual application write paths: the API persists CORS origins to `/tmp/cors-origins.json` by default (`api/src/governance/cors-manager.ts`), writes audit/compliance logs under `logs/` (`api/src/governance/audit-logger.ts`, `api/src/governance/compliance.ts`, `api/src/observability/logger.ts`), and the aggregator keeps price history files under `./data` via `services/aggregator/src/persistence/history.ts`.
-- **Why the mounts exist:** the API relies on a writable temporary CORS file and a file-backed log directory; the aggregator stores JSON price history in `data/` and writes runtime logs to `logs/`. The root filesystem remains read-only while these paths stay writable.
-- **Validation:** `scripts/validate-k8s.sh` parses the built overlays and fails if the API/aggregator Deployment manifests omit the required security fields. The CI workflow in `.github/workflows/k8s-validation.yml` runs that script on every change touching `k8s/**`.
-
-This is a static validation posture: it confirms the manifests satisfy the repository's restricted security baseline, but it does not assert a live cluster's admission or node-level enforcement. Actual cluster validation would require a reachable Kubernetes API server and policy-controller enforcement.
+**Threats mitigated:** cross-origin credential theft against an
+unconfigured deployment, split-brain allowlists between replicas, silent
+reversion of allowlist changes during rollouts, and wildcard origins
+combined with credentialed responses.
 
 ## Consolidated threat model & mitigations
 
@@ -242,6 +252,7 @@ This is a static validation posture: it confirms the manifests satisfy the repos
 | WebSocket request replay | §4 | `ts` ±30 s TTL + nonce dedup + timing-safe HMAC verify | WS signing tests |
 | WebSocket handshake flood | §4 | Per-IP upgrade buckets + connection caps | upgrade-guard tests |
 | Prototype pollution / XSS / log injection | §5 | Recursive sanitization: dangerous keys stripped, markup + control chars removed | sanitization suites |
+| Open redirect / plaintext downgrade via `Host` or `X-Forwarded-Proto` | §7 | Scheme from TLS socket or trusted proxy only; redirect to `PUBLIC_BASE_URL`; unexpected `Host` → 421; HSTS only on HTTPS | `https-redirect.test.ts` |
 
 ## Review cadence
 
