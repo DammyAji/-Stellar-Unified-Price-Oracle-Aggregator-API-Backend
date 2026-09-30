@@ -75,6 +75,14 @@ export const config = {
 
   assets: (process.env.WATCHED_ASSETS || 'XLM,USDC,BTC,ETH,USDT').split(','),
 
+  // Issue #579 — graceful shutdown. The drain deadline must stay smaller than
+  // the deployment's terminationGracePeriodSeconds (60s in k8s/*); see
+  // docs/PRODUCTION_DEPLOYMENT.md §10 for the arithmetic.
+  shutdown: {
+    drainDeadlineMs: parseInt(process.env.SHUTDOWN_DRAIN_DEADLINE_MS || '25000', 10),
+    forceExitMs: parseInt(process.env.SHUTDOWN_FORCE_EXIT_MS || '35000', 10),
+  },
+
   logLevel: process.env.LOG_LEVEL || 'info',
 
   region: {
@@ -121,7 +129,7 @@ export const config = {
       allowPrivateIps: process.env.SSRF_ALLOW_PRIVATE_IPS === 'true',
       requestTimeoutMs: parseInt(process.env.OUTBOUND_REQUEST_TIMEOUT_MS || '10000', 10),
     },
-    // WebSocket upgrade hardening (issue #40).
+    // WebSocket upgrade hardening (issue #40, #586).
     websocket: {
       allowedOrigins: commaList(process.env.WS_ALLOWED_ORIGINS),
       requireOrigin: process.env.WS_REQUIRE_ORIGIN !== 'false',

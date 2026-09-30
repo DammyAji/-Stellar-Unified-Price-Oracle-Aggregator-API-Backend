@@ -3,7 +3,7 @@ import { logger } from './logger';
 import { correlationHeaders } from '../infrastructure/correlation';
 import { SourceCBStatus } from '../price-aggregation/source-circuit-breaker';
 import { register } from './metrics';
-import { getDailyCounts } from '../infrastructure/cost-model';
+import { getDailyCounts, getBudgetStatuses } from '../infrastructure/cost-model';
 import { getUptimeHistory, getUptimeForPeriod, getLatestUptime } from '../persistence/uptime-history';
 import type { SourceHealthStatus, AggregatedPrice } from '@stellar-oracle/types';
 import type { RegionPriceRecord } from '../replication/price-crdt';
@@ -73,13 +73,15 @@ export class HealthServer {
           : [];
         const hasPrices = snap.lastAggregated.length > 0;
         const quarantined = snap.region?.quarantined === true;
-        const ready = hasPrices && !quarantined && openCircuits.length < Object.keys(snap.sourceHealth).length;
+        const shuttingDown = snap.shutdownInProgress === true;
+        const ready = hasPrices && !quarantined && !shuttingDown && openCircuits.length < Object.keys(snap.sourceHealth).length;
         const code = ready ? 200 : 503;
         res.writeHead(code, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: ready ? 'ready' : 'not_ready',
           hasPrices,
           quarantined,
+          shutdownInProgress: shuttingDown,
           startupTimeMs: snap.startupTimeMs ?? 0,
           openCircuitBreakers: openCircuits.length,
         }));
@@ -158,6 +160,8 @@ export class HealthServer {
             : [],
           // #65 — include daily API call counts
           dailyApiCalls: getDailyCounts(),
+          // #583 — per-source budget state (ok / warn / exhausted)
+          budgetStatuses: getBudgetStatuses(),
           // #382 — on-chain price staleness heartbeat, per asset
           onChainHeartbeat: snap.onChainHeartbeat || {},
           // #590 — resolved listen ports, so drift is visible at runtime

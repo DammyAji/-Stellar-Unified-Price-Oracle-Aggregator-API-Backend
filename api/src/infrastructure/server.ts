@@ -74,7 +74,7 @@ export class PriceWebSocketServer {
         return;
       }
 
-      const ip = this.clientIp(req);
+      const ip = this.guard.resolveClientIp(req);
       this.guard.onConnect(ip);
 
       const connectedAt = Date.now();

@@ -14,6 +14,7 @@ export class ChainlinkSource extends BaseSource {
   name: OracleSourceName = 'chainlink';
 
   private readonly baseUrl: string;
+  protected readonly schema: ProviderSchemaName = 'chainlink';
 
   constructor() {
     super();
@@ -22,11 +23,17 @@ export class ChainlinkSource extends BaseSource {
 
   async fetchPrice(asset: string): Promise<NormalizedPrice | null> {
     const symbol = this.toSymbol(asset);
-    const response = await httpClient.get<ChainlinkPriceResponse>(`${this.baseUrl}/price`, {
+    const response = await httpClient.get<unknown>(`${this.baseUrl}/price`, {
       params: { fsym: symbol, tsym: 'USD', api_key: config.sources.chainlink.apiKey },
     });
 
-    if (!response.data?.USD?.PRICE) return null;
+    const result = parseProviderResponse(this.schema, response.data, asset);
+    if (result.kind === 'no-price') return null;
+    if (result.kind === 'invalid-payload') {
+      reportInvalidPayload(this.name, asset, result, response.data);
+      this.recordInvalidPayload(asset, result.issues);
+      return null;
+    }
 
     // This endpoint returns a price but no observation time, so the provider's
     // own timestamp is unavailable. Passing `null` rather than `Date.now()`
@@ -38,13 +45,6 @@ export class ChainlinkSource extends BaseSource {
   }
 
   private toSymbol(asset: string): string {
-    const map: Record<string, string> = {
-      XLM: 'XLM',
-      USDC: 'USDC',
-      BTC: 'BTC',
-      ETH: 'ETH',
-      USDT: 'USDT',
-    };
-    return map[asset.toUpperCase()] || asset;
+    return asset.toUpperCase();
   }
 }

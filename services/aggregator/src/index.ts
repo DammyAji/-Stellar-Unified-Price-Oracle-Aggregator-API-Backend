@@ -24,10 +24,12 @@ import { DatabaseClient } from './persistence/database';
 import { BaseSource } from './oracle-sources/base';
 import { WebSocketServer } from './infrastructure/ws-server';
 import { HealthServer } from './observability/health-server';
+import { GracefulShutdownCoordinator, type ShutdownHooks } from './infrastructure/shutdown';
 import AlertManager from './observability/alert-manager';
 import { sourceCircuitBreaker } from './price-aggregation/source-circuit-breaker';
 import { eventBus } from './domain-events';
 import { decryptSecret } from './infrastructure/crypto';
+import { flushDailyCounts } from './infrastructure/cost-model';
 import { getVaultClient } from '@stellar-oracle/vault-client';
 import {
   enforceStartupCardinalityBudget,
@@ -77,6 +79,8 @@ const onChainHeartbeat: Record<string, number> = {};
 let db: DatabaseClient | null = null;
 let pollSources: BaseSource[] = [];
 let publisher: ContractPublisher | null = null;
+// Issue #579 — readiness flag flipped before any other shutdown step.
+let shutdownInProgress = false;
 
 async function poll(): Promise<AggregatedPrice[]> {
   const sources: BaseSource[] = pollSources;
@@ -381,6 +385,10 @@ async function main(): Promise<void> {
   let consecutiveOverruns = 0;
   const OVERRUN_ALERT_THRESHOLD = 3;
 
+  // Issue #579 — resolved when the cycle in flight at shutdown time finishes;
+  // the shutdown coordinator awaits it under the drain deadline.
+  let resolveInFlightCycle: (() => void) | null = null;
+
   async function runPollWithDeadline(deadlineMs: number): Promise<AggregatedPrice[]> {
     let timer: NodeJS.Timeout;
     const timeoutPromise = new Promise<never>((_, reject) => {
@@ -428,6 +436,13 @@ async function main(): Promise<void> {
         consecutiveOverruns = 0;
       }
 
+      // Issue #579 — release the shutdown coordinator if it is waiting on us.
+      if (resolveInFlightCycle) {
+        const resolve = resolveInFlightCycle;
+        resolveInFlightCycle = null;
+        resolve();
+      }
+
       if (!isShuttingDown) {
         // Overrun policy: skip tick and schedule next execution after remaining interval or minimum 1000ms delay
         const nextDelay = Math.max(1000, config.pollingIntervalMs - elapsedMs);
@@ -441,21 +456,52 @@ async function main(): Promise<void> {
 
   fileArchival.start();
 
-  process.on('SIGTERM', async () => {
-    logger.info('Shutting down...');
-    isShuttingDown = true;
-    if (pollTimeout) clearTimeout(pollTimeout);
-    fileArchival.stop();
-    wss.stop();
-    healthServer.stop();
-    if (publisher) {
+  // Issue #579 — one idempotent handler covers SIGTERM and SIGINT.
+  const shutdownHooks: ShutdownHooks = {
+    flipReadiness: () => {
+      shutdownInProgress = true;
+      isShuttingDown = true;
+      logger.info('[Shutdown] Readiness flipped to not-ready; waiting for the in-flight poll cycle to finish');
+    },
+    stopScheduledWork: () => {
+      if (pollTimeout) {
+        clearTimeout(pollTimeout);
+        pollTimeout = null;
+      }
+      fileArchival.stop();
+    },
+    waitForInFlightCycle: async () => {
+      if (!isPolling) return true;
+      const drained = await Promise.race([
+        new Promise<boolean>((resolve) => {
+          resolveInFlightCycle = () => resolve(true);
+        }),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), config.shutdown.drainDeadlineMs)),
+      ]);
+      resolveInFlightCycle = null;
+      return drained;
+    },
+    drainRetryQueue: async () => {
+      if (!publisher) return;
       await publisher.shutdown();
-    }
-    if (db) {
-      db.disconnect().catch((err) => logger.error('Error disconnecting from database', err));
-    }
-    process.exit(0);
+    },
+    closeServers: async () => {
+      // #583 — flush persisted daily call counters so budgets survive restarts.
+      flushDailyCounts();
+      wss.stop();
+      healthServer.stop();
+    },
+    disconnectDatabase: async () => {
+      if (!db) return;
+      await db.disconnect();
+    },
+  };
+
+  const shutdownCoordinator = new GracefulShutdownCoordinator(shutdownHooks, {
+    drainDeadlineMs: config.shutdown.drainDeadlineMs,
+    forceExitMs: config.shutdown.forceExitMs,
   });
+  shutdownCoordinator.register(['SIGTERM', 'SIGINT']);
 }
 
 if (require.main === module) {
