@@ -45,7 +45,7 @@ serve the data to downstream DeFi protocols.
 │   │   ├── replication/        # region replicator, CRDT, Kafka bus, quarantine
 │   │   ├── observability/      # logger, metrics, health-server, alert-manager
 │   │   ├── infrastructure/     # config, types, http-client, ssrf, ws-server, crypto
-│   │   ├── performance/, migrations/, domain-events/
+│   │   ├── migrations/, domain-events/
 │   │   └── ws-server.ts is NOT here — it lives in infrastructure/ws-server.ts
 │   └── tests/
 │

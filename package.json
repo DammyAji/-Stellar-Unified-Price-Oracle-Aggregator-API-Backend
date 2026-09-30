@@ -10,7 +10,8 @@
   "scripts": {
     "build:types": "cd packages/types && npm run build",
     "build:vault": "cd packages/vault-client && npm run build",
-    "build:packages": "npm run build:types && npm run build:vault",
+    "build:ssrf": "cd packages/ssrf-guard && npm run build",
+    "build:packages": "npm run build:types && npm run build:vault && npm run build:ssrf",
     "build:aggregator": "cd services/aggregator && npm run build",
     "build:api": "cd api && npm run build",
     "build:backend": "npm run build:packages && npm run build:aggregator && npm run build:api",

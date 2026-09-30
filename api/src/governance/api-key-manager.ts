@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { logger } from '../observability/logger';
+import { config } from '../infrastructure/config';
 import type { Role } from './rbac';
 import { decryptSecret } from './crypto';
 import type { ApiKeyEntry } from '@stellar-oracle/vault-client';
@@ -31,7 +32,7 @@ export interface GeneratedApiKey extends ApiKeyMetadata {
   key: string;
 }
 
-export interface ApiKeyStore {
+export interface ApiKeyStoreMap {
   [keyHash: string]: ApiKeyMetadata;
 }
 
@@ -69,11 +70,79 @@ function canonicalKeyJson(entries: Record<string, ApiKeyEntry>): string {
 }
 
 export class ApiKeyManager {
-  /** Keyed by SHA-256 hash of the API key — plaintext keys are never retained. */
+  /** Local mirror of the shared store, keyed by SHA-256 hash — plaintext is never retained. */
   private keys: Map<string, ApiKeyMetadata> = new Map();
 
   constructor(private window: TenantWindow = createTenantWindow()) {
     this.loadKeysFromEnv();
+  }
+
+  /**
+   * Bootstrap from the shared store. The store is authoritative: if it already
+   * holds keys they replace whatever this replica loaded from the environment,
+   * and the environment is used only to seed an empty store. A failed load marks
+   * the store unhealthy, which fails every subsequent validation closed.
+   */
+  async initialize(): Promise<void> {
+    if (this.bootstrapped) return;
+    try {
+      const snapshot = await this.store.load();
+      if (snapshot.length > 0) {
+        this.keys = this.toLocalMap(snapshot);
+        logger.info(`Loaded ${this.keys.size} API keys from the ${this.store.kind} store`);
+      } else if (this.keys.size > 0) {
+        await this.persistAll(Array.from(this.keys.values()));
+        logger.info(`Seeded ${this.keys.size} API keys into the ${this.store.kind} store`);
+      }
+      this.storeHealthy = true;
+      this.bootstrapped = true;
+    } catch (err) {
+      this.storeHealthy = false;
+      logger.error(`API key store unavailable at bootstrap (${this.store.kind})`, err);
+    }
+  }
+
+  /** Reconcile the local mirror with the store. Called on a timer and after writes. */
+  async refresh(): Promise<void> {
+    if (!this.bootstrapped) return;
+    try {
+      const snapshot = await this.store.load();
+      this.keys = this.toLocalMap(snapshot);
+      this.storeHealthy = true;
+    } catch (err) {
+      this.storeHealthy = false;
+      logger.error(`API key store refresh failed (${this.store.kind})`, err);
+    }
+  }
+
+  /** Start the background refresh loop that bounds cross-replica staleness. */
+  startRefresh(intervalMs: number = config.apiKeyStore.refreshIntervalMs): void {
+    if (this.refreshTimer) return;
+    if (intervalMs <= 0) return;
+    this.refreshTimer = setInterval(() => {
+      void this.refresh();
+    }, intervalMs);
+    this.refreshTimer.unref?.();
+  }
+
+  stopRefresh(): void {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+  }
+
+  /** Await every queued store write. */
+  async flush(): Promise<void> {
+    await this.pendingWrites;
+  }
+
+  get isStoreHealthy(): boolean {
+    return this.storeHealthy;
+  }
+
+  get storeKind(): ApiKeyStore['kind'] {
+    return this.store.kind;
   }
 
   generateKey(rateLimitPerMin: number = TIER_RATE_LIMITS.free, description?: string, tier: KeyTier = 'free', role: Role = 'viewer', scopes?: string[]): GeneratedApiKey {
@@ -94,12 +163,17 @@ export class ApiKeyManager {
     };
 
     this.keys.set(keyHash, metadata);
+    this.persist(metadata);
     logger.info(`Generated new API key: ${metadata.keyPrefix}... tier=${tier} role=${role} limit=${rateLimitPerMin}/min`);
 
     return { ...metadata, key };
   }
 
   validateKey(key: string): { valid: boolean; metadata?: ApiKeyMetadata; error?: string } {
+    if (!this.storeHealthy) {
+      return { valid: false, error: 'API key store unavailable' };
+    }
+
     const metadata = this.keys.get(this.hashKey(key));
 
     if (!metadata) {
@@ -114,6 +188,7 @@ export class ApiKeyManager {
   }
 
   isAdminKey(key: string): boolean {
+    if (!this.storeHealthy) return false;
     const metadata = this.keys.get(this.hashKey(key));
     return !!metadata && metadata.role === 'admin';
   }
@@ -177,6 +252,10 @@ export class ApiKeyManager {
 
     this.keys.delete(oldKeyHash);
     this.keys.set(newHash, newMetadata);
+    this.enqueue(async () => {
+      await this.store.remove(oldKeyHash);
+      await this.store.put(newMetadata);
+    });
     logger.info(`Rotated API key: old=${metadata.keyPrefix}... new=${newMetadata.keyPrefix}...`);
 
     return { ...newMetadata, key: newKey };
@@ -187,6 +266,7 @@ export class ApiKeyManager {
     if (!metadata) return false;
 
     metadata.isActive = false;
+    this.persist(metadata);
     logger.info(`Revoked API key: ${metadata.keyPrefix}...`);
     return true;
   }
@@ -200,6 +280,7 @@ export class ApiKeyManager {
     if (!metadata) return false;
 
     metadata.isActive = true;
+    this.persist(metadata);
     logger.info(`Reactivated API key: ${metadata.keyPrefix}...`);
     return true;
   }
@@ -248,6 +329,7 @@ export class ApiKeyManager {
 
     metadata.tier = tier;
     metadata.rateLimitPerMin = TIER_RATE_LIMITS[tier];
+    this.persist(metadata);
     logger.info(`Updated tier for ${metadata.keyPrefix}... to ${tier} (${TIER_RATE_LIMITS[tier]}/min)`);
     return true;
   }
@@ -467,6 +549,40 @@ export class ApiKeyManager {
     return prefix + crypto.randomBytes(32).toString('hex');
   }
 
+  private toLocalMap(snapshot: ApiKeyMetadata[]): Map<string, ApiKeyMetadata> {
+    const next = new Map<string, ApiKeyMetadata>();
+    for (const entry of snapshot) {
+      const local = this.keys.get(entry.keyHash);
+      // lastUsed/requestCount are per-replica activity counters, not shared
+      // state: the locally observed value is the more accurate one.
+      const counters = local
+        ? { lastUsed: local.lastUsed, requestCount: local.requestCount }
+        : { lastUsed: entry.lastUsed, requestCount: entry.requestCount };
+      next.set(entry.keyHash, { ...entry, ...counters });
+    }
+    return next;
+  }
+
+  private persist(entry: ApiKeyMetadata): void {
+    this.enqueue(() => this.store.put(entry));
+  }
+
+  private persistAll(entries: ApiKeyMetadata[]): void {
+    if (entries.length === 0) return;
+    this.enqueue(async () => {
+      for (const entry of entries) {
+        await this.store.put(entry);
+      }
+    });
+  }
+
+  private enqueue(write: () => Promise<void>): void {
+    this.pendingWrites = this.pendingWrites.then(write).catch((err) => {
+      this.storeHealthy = false;
+      logger.error(`API key store write failed (${this.store.kind})`, err);
+    });
+  }
+
   private loadKeysFromEnv(): void {
     const envKeys = process.env.API_KEYS ? decryptSecret(process.env.API_KEYS) : undefined;
     if (!envKeys) {
@@ -480,8 +596,8 @@ export class ApiKeyManager {
 
     try {
       // Format: key1:limit1:desc1:tier1:role1,key2:...
-      for (const config of envKeys.split(',')) {
-        const parts = config.trim().split(':');
+      for (const spec of envKeys.split(',')) {
+        const parts = spec.trim().split(':');
         if (parts.length >= 1 && parts[0]) {
           const key = parts[0];
           const limit = parseInt(parts[1], 10);

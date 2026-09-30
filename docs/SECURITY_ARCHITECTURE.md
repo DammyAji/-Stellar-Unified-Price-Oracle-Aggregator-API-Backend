@@ -16,7 +16,7 @@ is verified, and *which threats it mitigates*.  All code references are to
 
 | # | Control area | Implementation | Tests |
 |---|---|---|---|
-| 1 | SSRF protection | `services/aggregator/src/infrastructure/ssrf.ts` | `tests/ssrf-private-ip.test.ts`, `tests/ssrf-circuit-breaker.test.ts` |
+| 1 | SSRF protection | `packages/ssrf-guard` (shared policy), `services/aggregator/src/infrastructure/ssrf.ts` (oracle egress wiring) | `tests/ssrf-private-ip.test.ts`, `tests/ssrf-circuit-breaker.test.ts` |
 | 2 | Encryption at rest | `api/src/governance/crypto.ts`, aggregator crypto util, `scripts/encrypt-secret.ts`, `packages/vault-client` | `tests/encryption-at-rest.test.ts`, `tests/history-encryption.test.ts` |
 | 3 | API authentication | `api/src/governance/auth.ts`, `api/src/governance/api-key-manager.ts`, `api/src/governance/rbac.ts` | `api/tests/*` (auth, api-key, rate-limit suites) |
 | 4 | WebSocket signing & upgrade protection | `api/src/governance/ws-signing.ts`, `api/src/infrastructure/csrf.ts`, `api/src/infrastructure/upgrade-guard.ts`, `api/src/infrastructure/server.ts` | WS auth/CSRF/signing suites |
@@ -47,7 +47,9 @@ is verified, and *which threats it mitigates*.  All code references are to
 
 ## 1. SSRF protection
 
-**Where:** `services/aggregator/src/infrastructure/ssrf.ts`, wired into
+**Where:** `packages/ssrf-guard` holds the policy, the CIDR blocklist and the
+secure DNS lookup; `services/aggregator/src/infrastructure/ssrf.ts` binds that
+policy to this service's config and logger and wires it into
 `src/infrastructure/http-client.ts` (all outbound oracle-source requests).
 
 The guard, applied before and during every outbound request, enforces:
@@ -244,6 +246,7 @@ combined with credentialed responses.
 | Threat | Affected control | Mitigation (implemented) | Verification |
 |---|---|---|---|
 | SSRF — internal metadata/service access via oracle-source URLs | §1 | Protocol allowlist, host allowlist, private-IP CIDR block, DNS-rebinding revalidation, circuit breaker | ssrf-private-ip / ssrf-circuit-breaker tests |
+| SSRF — internal metadata/service access via a registered webhook URL | §7 | Static validation at registration *and* delivery, HTTPS required, exact-host + per-tenant allowlist, connect-time private-IP refusal, redirects never followed, normalized failure surfaces | ssrf-guard / webhook-ssrf tests |
 | Data-at-rest theft (DB/backups/history) | §2 | AES-256-GCM `enc:v1:` payloads, per-key tagging, rotation with previous-key grace | encryption-at-rest / history-encryption tests |
 | Unauthenticated/unauthorized API access | §3 | Bearer/X-API-Key auth, SHA-256 hashed keys, RBAC roles, tiered rate limits | API auth + rate-limit suites |
 | Key exfiltration | §2, §3, §6 | Plaintext never stored; Vault-backed keys; startup decryption | encryption-at-rest, api-key tests |

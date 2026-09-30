@@ -59,6 +59,11 @@ let consistencyChecker: DataConsistencyChecker | null = null;
 let backupService: BackupService | null = null;
 
 async function initializeApp(): Promise<void> {
+  // Load API keys from the shared store (issue #591); env keys only seed an
+  // empty store, and an unreachable store fails validation closed.
+  await apiKeyManager.initialize();
+  apiKeyManager.startRefresh();
+
   // Initialize Vault for API key and webhook secret management
   try {
     const vault = getVaultClient();

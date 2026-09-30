@@ -10,6 +10,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@stellar-oracle/ssrf-guard": "*",
     "@stellar-oracle/types": "*",
     "@stellar-oracle/vault-client": "*",
     "@stellar/stellar-sdk": "^12.1.0",

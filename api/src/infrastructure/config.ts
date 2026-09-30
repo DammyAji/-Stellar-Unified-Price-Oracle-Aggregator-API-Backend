@@ -14,6 +14,38 @@ export function optionalSecretEnv(name: string): string | undefined {
   return value ? decryptSecret(value) : undefined;
 }
 
+function commaList(value?: string): string[] {
+  return (value || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * `WEBHOOK_ALLOWED_HOSTS_BY_TENANT` holds a JSON object mapping an API key
+ * prefix to the hosts that key's tenant may register. Unparsable or malformed
+ * values are ignored rather than silently widening the allowlist.
+ */
+function hostMapEnv(name: string): Record<string, string[]> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+
+  const out: Record<string, string[]> = {};
+  for (const [tenant, hosts] of Object.entries(parsed as Record<string, unknown>)) {
+    if (Array.isArray(hosts)) {
+      out[tenant.toLowerCase()] = hosts.map((host) => String(host).toLowerCase());
+    }
+  }
+  return out;
+}
+
 export const config = {
   sandbox: {
     enabled: process.env.SANDBOX_ENABLED === 'true',
@@ -40,6 +72,15 @@ export const config = {
     .filter(Boolean),
   cacheTtlMs: parseInt(process.env.CACHE_TTL_MS || '15000', 10),
   redisUrl: optionalSecretEnv('REDIS_URL'),
+  // Shared API key store (issue #591). Defaults to redis when REDIS_URL is
+  // set, otherwise to a per-process in-memory store.
+  apiKeyStore: {
+    type: (process.env.API_KEY_STORE || (process.env.REDIS_URL ? 'redis' : 'memory')) as
+      | 'memory'
+      | 'redis',
+    refreshIntervalMs: parseInt(process.env.API_KEY_STORE_REFRESH_MS || '1000', 10),
+    failClosed: process.env.API_KEY_STORE_FAIL_CLOSED !== 'false',
+  },
   priceCacheTtl: parseInt(process.env.PRICE_CACHE_TTL_MS || '15000', 10),
   historyCacheTtl: parseInt(process.env.HISTORY_CACHE_TTL_MS || '60000', 10),
   sourcesCacheTtl: parseInt(process.env.SOURCES_CACHE_TTL_MS || '300000', 10),

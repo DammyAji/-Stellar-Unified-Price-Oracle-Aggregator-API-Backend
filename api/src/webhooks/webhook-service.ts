@@ -1,4 +1,5 @@
 import crypto, { randomUUID } from 'crypto';
+import { validateOutboundUrl } from '@stellar-oracle/ssrf-guard';
 import { config } from '../infrastructure/config';
 import { logger } from '../observability/logger';
 import { getVaultClient } from '@stellar-oracle/vault-client';
@@ -400,6 +401,11 @@ class WebhookService {
           },
           body,
           signal: controller.signal,
+          // Never follow. A 302 to an internal address would otherwise be
+          // fetched by undici without ever passing the connect-time lookup,
+          // which is the whole escape route this issue describes.
+          redirect: 'manual',
+          dispatcher: getWebhookDispatcher(),
         });
 
         this.logDelivery({
@@ -419,7 +425,8 @@ class WebhookService {
           return true;
         }
 
-        webhook.lastFailure = `HTTP ${res.status}`;
+        webhook.lastFailure =
+          res.status >= 300 && res.status < 400 ? 'redirect-not-followed' : `HTTP ${res.status}`;
         webhook.status = 'degraded';
         webhook.failureCount += 1;
         return false;
