@@ -24,9 +24,24 @@ spec:
         slot: blue
     spec:
       terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: api
           image: ghcr.io/stellar-unified-price-oracle/stellar-oracle-api:IMAGE_TAG_PLACEHOLDER
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3000
               name: http
@@ -37,11 +52,20 @@ spec:
               value: production
             - name: DEPLOYMENT_SLOT
               value: blue
+            - name: CORS_PERSIST_PATH
+              value: /tmp/cors-origins.json
           envFrom:
             - secretRef:
                 name: stellar-oracle-secrets
             - configMapRef:
                 name: stellar-oracle-config
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: data
+              mountPath: /app/data
+            - name: logs
+              mountPath: /app/logs
           resources:
             requests:
               cpu: "250m"
@@ -67,3 +91,10 @@ spec:
             preStop:
               exec:
                 command: ["/bin/sh", "-c", "sleep 10"]
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}

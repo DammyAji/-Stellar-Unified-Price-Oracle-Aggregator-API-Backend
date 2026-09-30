@@ -3,5 +3,10 @@ kind: Namespace
 metadata:
   name: stellar-oracle-dev
   labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.29
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  labels:
     app.kubernetes.io/part-of: stellar-oracle
     istio-injection: enabled
