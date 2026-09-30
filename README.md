@@ -68,7 +68,7 @@ A Soroban-based price oracle aggregator that pulls from **Chainlink**, **Redston
 make install
 
 # Run in development (two terminals)
-make dev-aggregator   # Terminal 1 — polls sources + WS on :4000
+make dev-aggregator   # Terminal 1 — polls sources + WS on :4001
 make dev-api          # Terminal 2 — REST on :3000, WS on :3001
 
 # Build everything

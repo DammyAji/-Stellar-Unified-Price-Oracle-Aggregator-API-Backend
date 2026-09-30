@@ -19,13 +19,15 @@ vi.mock('../src/price-aggregation/source-circuit-breaker', () => ({
   },
 }));
 
-vi.mock('../src/observability/metrics', () => {
+vi.mock('../src/observability/metrics', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/observability/metrics')>();
   const mockGauge = { set: vi.fn(), inc: vi.fn() };
   const mockCounter = { inc: vi.fn() };
   const mockHistogram = {
     startTimer: vi.fn(() => (labels?: Record<string, string>) => 0),
   };
   return {
+    ...actual,
     oracleSourceLatency: mockHistogram,
     oracleSourceRequestsTotal: mockCounter,
     oracleSourceSlaBreaches: mockCounter,
@@ -216,17 +218,30 @@ describe('RedstoneSource', () => {
     expect(price!.price).toBe(6500000000000n);
   });
 
-  it('fetches and normalizes ETH price with default decimals=8', async () => {
+  it('preserves a legitimate zero-decimals payload', async () => {
+    mockedHttpClient.get.mockResolvedValue({
+      data: { BTC: { value: '65000', decimals: 0 } },
+    } as never);
+
+    const source = new RedstoneSource();
+    const price = await source.fetchPrice('BTC');
+
+    expect(price).not.toBeNull();
+    expect(price!.decimals).toBe(0);
+    expect(price!.price).toBe(65000n);
+  });
+
+  it('fails explicitly when the payload omits decimals', async () => {
     mockedHttpClient.get.mockResolvedValue({
       data: { ETH: { value: '3500' } },
     } as never);
 
     const source = new RedstoneSource();
-    const price = await source.fetchPrice('ETH');
 
-    expect(price).not.toBeNull();
-    expect(price!.decimals).toBe(8);
-    expect(price!.price).toBe(350000000000n);
+    await expect(source.fetchPrice('ETH')).rejects.toMatchObject({
+      code: 'invalid-payload',
+      reason: 'decimals-missing',
+    });
   });
 
   it('returns null when asset not in response data', async () => {
@@ -339,10 +354,10 @@ describe('BandSource', () => {
     expect(price!.timestamp).toBe(1719000000);
   });
 
-  it('fetches and normalizes XLM price with default decimals=9', async () => {
+  it('fetches and normalizes XLM price at the reported 9 decimals', async () => {
     mockedHttpClient.get.mockResolvedValue({
       data: {
-        data: { price: '12000000', updated_at: 1719000000 },
+        data: { price: '12000000', decimals: 9, updated_at: 1719000000 },
       },
     } as never);
 
@@ -354,10 +369,23 @@ describe('BandSource', () => {
     expect(price!.price).toBe(12000000000000000n);
   });
 
+  it('preserves a legitimate zero-decimals payload', async () => {
+    mockedHttpClient.get.mockResolvedValue({
+      data: { data: { price: '12', decimals: 0, updated_at: 1719000000 } },
+    } as never);
+
+    const source = new BandSource();
+    const price = await source.fetchPrice('XLM');
+
+    expect(price).not.toBeNull();
+    expect(price!.decimals).toBe(0);
+    expect(price!.price).toBe(12n);
+  });
+
   it('uses current time when updated_at is missing', async () => {
     const now = Math.floor(Date.now() / 1000);
     mockedHttpClient.get.mockResolvedValue({
-      data: { data: { price: '12000000' } },
+      data: { data: { price: '12000000', decimals: 9 } },
     } as never);
 
     const source = new BandSource();
@@ -446,7 +474,7 @@ describe('BandSource', () => {
 
   it('falls back to {symbol}-USD for unknown assets', async () => {
     mockedHttpClient.get.mockResolvedValue({
-      data: { data: { price: '100' } },
+      data: { data: { price: '100', decimals: 8 } },
     } as never);
 
     const source = new BandSource();
@@ -459,11 +487,24 @@ describe('BandSource', () => {
 
   it('rejects on malformed non-numeric price', async () => {
     mockedHttpClient.get.mockResolvedValue({
-      data: { data: { price: 'not-a-number' } },
+      data: { data: { price: 'not-a-number', decimals: 8 } },
     } as never);
 
     const source = new BandSource();
     await expect(source.fetchPrice('XLM')).rejects.toThrow();
+  });
+
+  it('rejects decimals the contract would refuse', async () => {
+    mockedHttpClient.get.mockResolvedValue({
+      data: { data: { price: '100', decimals: 19 } },
+    } as never);
+
+    const source = new BandSource();
+
+    await expect(source.fetchPrice('XLM')).rejects.toMatchObject({
+      code: 'invalid-payload',
+      reason: 'decimals-out-of-range',
+    });
   });
 });
 
@@ -489,10 +530,10 @@ describe('ReflectorSource', () => {
     expect(price!.timestamp).toBe(1719000000);
   });
 
-  it('fetches and normalizes XLM price with default decimals=8', async () => {
+  it('fetches and normalizes XLM price at the reported 8 decimals', async () => {
     mockedHttpClient.get.mockResolvedValue({
       data: {
-        prices: { 'Crypto.XLM/USD': { price: '0.12' } },
+        prices: { 'Crypto.XLM/USD': { price: '0.12', decimals: 8 } },
       },
     } as never);
 
@@ -502,6 +543,36 @@ describe('ReflectorSource', () => {
     expect(price).not.toBeNull();
     expect(price!.decimals).toBe(8);
     expect(price!.price).toBe(12000000n);
+  });
+
+  it('preserves a legitimate zero-decimals payload', async () => {
+    mockedHttpClient.get.mockResolvedValue({
+      data: {
+        prices: { 'Crypto.XLM/USD': { price: '12', decimals: 0 } },
+      },
+    } as never);
+
+    const source = new ReflectorSource();
+    const price = await source.fetchPrice('XLM');
+
+    expect(price).not.toBeNull();
+    expect(price!.decimals).toBe(0);
+    expect(price!.price).toBe(12n);
+  });
+
+  it('fails explicitly when the payload omits decimals', async () => {
+    mockedHttpClient.get.mockResolvedValue({
+      data: {
+        prices: { 'Crypto.XLM/USD': { price: '0.12' } },
+      },
+    } as never);
+
+    const source = new ReflectorSource();
+
+    await expect(source.fetchPrice('XLM')).rejects.toMatchObject({
+      code: 'invalid-payload',
+      reason: 'decimals-missing',
+    });
   });
 
   it('uses current time when timestamp is missing', async () => {

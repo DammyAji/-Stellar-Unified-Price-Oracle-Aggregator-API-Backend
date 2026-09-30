@@ -45,7 +45,7 @@ serve the data to downstream DeFi protocols.
 │   │   ├── replication/        # region replicator, CRDT, Kafka bus, quarantine
 │   │   ├── observability/      # logger, metrics, health-server, alert-manager
 │   │   ├── infrastructure/     # config, types, http-client, ssrf, ws-server, crypto
-│   │   ├── performance/, migrations/, domain-events/
+│   │   ├── migrations/, domain-events/
 │   │   └── ws-server.ts is NOT here — it lives in infrastructure/ws-server.ts
 │   └── tests/
 │
@@ -109,16 +109,17 @@ Reflector ─┘    (poll loop,      (on-chain storage)
 |---|---|---|
 | 3000 | API | REST (`API_PORT`) |
 | 3001 | API | WebSocket (`WS_PORT`), client-driven subscriptions |
-| 4000 | — | Nothing. Exposed in compose, but unbound |
 | 4001 | Aggregator | WebSocket broadcast — the price push path |
-| 4002 | Aggregator | HTTP `/health` |
+| 4002 | Aggregator | HTTP `/health` and `/metrics` |
 | 5432 | TimescaleDB | PostgreSQL / hypertables |
 | 4317-4318 | Jaeger | OTLP receivers |
 | 8200 | Vault | Dev-mode secret store |
 
 The aggregator's ports are offset, not equal, to `PORT`: its WebSocket listens
-on `PORT + 1` and its health server on `PORT + 2`, so `PORT=4000` means the push
-socket is on **4001**. Do not assume `:4000/health` or `:4000` serve anything.
+on `PORT + 1` and its health/metrics server on `PORT + 2`, so `PORT=4000` means
+the push socket is on **4001** and `/health` + `/metrics` are on **4002**.
+Nothing listens on `PORT` itself — no manifest, compose file or Service
+declares it (enforced by `scripts/check-port-consistency.mjs`).
 
 The API's WebSocket (3001) and the aggregator's (4001) are different servers.
 The aggregator is what broadcasts `price_update`; the API's
@@ -155,7 +156,8 @@ Run from the repository root unless stated otherwise.
 5. **CI** (`.github/workflows/ci.yml`) runs: cost-model check, price-correctness
    validation, aggregator (typecheck + coverage + build), api (typecheck +
    coverage + build), contract formal verification (cargo test + verification
-   report), kustomize overlay validation, and a perf-regression benchmark.
+   report), aggregator port consistency (`scripts/check-port-consistency.mjs`),
+   kustomize overlay validation, and a perf-regression benchmark.
 
 ### Integration tests
 

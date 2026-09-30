@@ -2,6 +2,7 @@ import { httpClient } from '../infrastructure/http-client';
 import { config } from '../infrastructure/config';
 import { NormalizedPrice, OracleSourceName } from '../infrastructure/types';
 import { BaseSource } from './base';
+import { resolveDecimals } from './decimals';
 
 interface BandFeedData {
   price: string;
@@ -27,12 +28,14 @@ export class BandSource extends BaseSource {
 
     if (!response.data?.data?.price) return null;
 
+    const decimals = resolveDecimals(this.name, response.data.data.decimals);
+
     // Band reports the provider's own update time; keep it as `observedAt`
     // rather than falling back to local fetch time when it is missing.
     return this.normalize(
       asset,
       response.data.data.price,
-      response.data.data.decimals || 9,
+      decimals,
       response.data.data.updated_at ?? null,
     );
   }

@@ -2,6 +2,7 @@ import { httpClient } from '../infrastructure/http-client';
 import { config } from '../infrastructure/config';
 import { NormalizedPrice, OracleSourceName } from '../infrastructure/types';
 import { BaseSource } from './base';
+import { resolveDecimals } from './decimals';
 
 interface ChainlinkPriceResponse {
   USD?: {
@@ -30,8 +31,10 @@ export class ChainlinkSource extends BaseSource {
     // This endpoint returns a price but no observation time, so the provider's
     // own timestamp is unavailable. Passing `null` rather than `Date.now()`
     // keeps that gap visible: the resulting price is never counted as
-    // age-verified, instead of looking permanently fresh.
-    return this.normalize(asset, response.data.USD.PRICE, 8, null);
+    // age-verified, instead of looking permanently fresh. The scale is the
+    // fixed 8 dp contract of this endpoint (see SOURCE_DECIMALS), not a
+    // fallback for a field the payload never contained.
+    return this.normalize(asset, response.data.USD.PRICE, resolveDecimals(this.name, undefined), null);
   }
 
   private toSymbol(asset: string): string {

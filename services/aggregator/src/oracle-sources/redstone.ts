@@ -2,6 +2,7 @@ import { httpClient } from '../infrastructure/http-client';
 import { config } from '../infrastructure/config';
 import { NormalizedPrice, OracleSourceName } from '../infrastructure/types';
 import { BaseSource } from './base';
+import { resolveDecimals } from './decimals';
 
 interface RedstonePriceData {
   value: string | number;
@@ -31,6 +32,6 @@ export class RedstoneSource extends BaseSource {
 
     // The response carries no observation time, so the age of this price
     // cannot be established from the provider (`null`, not `Date.now()`).
-    return this.normalize(asset, data.value, data.decimals || 8, null);
+    return this.normalize(asset, data.value, resolveDecimals(this.name, data.decimals), null);
   }
 }

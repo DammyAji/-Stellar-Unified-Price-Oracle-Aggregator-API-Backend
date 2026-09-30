@@ -35,8 +35,6 @@ spec:
         - podSelector: {}
       ports:
         - protocol: TCP
-          port: 4000
-        - protocol: TCP
           port: 4001
         - protocol: TCP
           port: 4002
@@ -46,7 +44,7 @@ spec:
               kubernetes.io/metadata.name: monitoring
       ports:
         - protocol: TCP
-          port: 4000
+          port: 4002
   egress:
     # Internal: TimescaleDB
     - to:
@@ -147,8 +145,6 @@ spec:
             matchLabels:
               app: aggregator
       ports:
-        - protocol: TCP
-          port: 4000
         - protocol: TCP
           port: 4001
         - protocol: TCP

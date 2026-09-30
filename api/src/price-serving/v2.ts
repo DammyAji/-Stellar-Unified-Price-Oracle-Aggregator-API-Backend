@@ -81,7 +81,7 @@ router.get('/assets', async (req: Request, res: Response) => {
   const prices = await readAssetPrices();
   const assets = prices.map((p) => ({
     symbol: p.asset,
-    decimals: p.decimals || 8,
+    decimals: p.decimals ?? 8,
     sources: Array.isArray(p.sources) ? p.sources : [p.sources],
     sourceCount: Array.isArray(p.sources) ? p.sources.length : 1,
     status: 'active',

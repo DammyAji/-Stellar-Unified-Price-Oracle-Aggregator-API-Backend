@@ -259,6 +259,7 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
 
       await webhookService.handlePriceUpdate('XLM', 0.5);
       await webhookService.handlePriceUpdate('XLM', 0.53);
+      await webhookService.drain();
 
       const deliveries = await webhookService.deliveries();
       expect(deliveries.length).toBeGreaterThan(0);
@@ -273,6 +274,7 @@ describe('Webhooks: CRUD Management and Delivery System', () => {
       ));
 
       await webhookService.handlePriceUpdate('XLM', 0.5);
+      await webhookService.drain();
 
       const deliveries = await webhookService.deliveries(webhook.id);
       expect(deliveries.length).toBeGreaterThan(0);

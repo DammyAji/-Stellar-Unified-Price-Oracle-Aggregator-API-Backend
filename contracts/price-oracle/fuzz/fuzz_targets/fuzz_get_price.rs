@@ -1,5 +1,27 @@
 #![no_main]
 
+//! Fuzz target: `get_price` / `get_price_history`.
+//!
+//! ## Entrypoint under test
+//! `PriceOracleContract::get_price` and `PriceOracleContract::get_price_history`,
+//! exercised after an arbitrary sequence of `submit_price` calls.
+//!
+//! ## Invariants asserted
+//! - `get_price` and `get_price_history` must never panic for any input.
+//! - When `get_price` returns `Some`, the returned history length is bounded by
+//!   `min(submitted_for_query, history_limit)`.
+//!
+//! ## What a failure means
+//! A panic or a violated bound is a real contract bug. Per the crash triage
+//! policy (see `fuzz/README.md`), the offending input is committed as a
+//! regression seed under `fuzz/corpus/fuzz_get_price/` and a matching test is
+//! added in `src/*_test.rs`; the CI workflow fails rather than warns.
+//!
+//! ## Corpus growth policy
+//! Seeds are committed under `fuzz/corpus/fuzz_get_price/`. Any input that
+//! triggers a crash is committed as a regression seed so the target stays
+//! reproducible locally and in CI.
+
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use soroban_sdk::{testutils::Address as _, Address, Env, String as SorobanString};

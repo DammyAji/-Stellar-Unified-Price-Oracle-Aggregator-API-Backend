@@ -32,7 +32,7 @@ Rust and the Soroban CLI are optional for pure API/aggregator work — `make bui
 
 **Option A — Makefile (two terminals, no Docker):**
 ```bash
-make dev-aggregator   # Terminal 1 — polls oracle sources, WS on :4000
+make dev-aggregator   # Terminal 1 — polls oracle sources, WS on :4001
 make dev-api          # Terminal 2 — REST on :3000, WS on :3001
 ```
 

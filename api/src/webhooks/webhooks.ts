@@ -1,7 +1,12 @@
-import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { webhookService, type WebhookRegistration } from './webhook-service';
+import {
+  webhookService,
+  WEBHOOK_SIGNATURE_ALGORITHM,
+  WEBHOOK_SIGNATURE_FORMAT,
+  WEBHOOK_SIGNATURE_HEADER,
+  type WebhookRegistration,
+} from './webhook-service';
 import { links, withLinks } from '../price-serving/hypermedia';
 import { sendError } from '../infrastructure/error';
 
@@ -24,16 +29,10 @@ function keyPrefixOf(req: Request): string {
   return req.apiKey ? req.apiKey.substring(0, 8) : 'anonymous';
 }
 
-function asyncRoute(handler: (req: Request, res: Response) => Promise<void>) {
-  return (req: Request, res: Response): void => {
-    handler(req, res).catch((err: unknown) => {
-      sendError(res, err, { path: req.path, method: req.method, requestId: req.requestId });
-    });
-  };
-}
-
-function notFound(res: Response): void {
-  res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Webhook not found' } });
+function publicView(webhook: WebhookRegistration): Omit<WebhookRegistration, 'secret'> {
+  const view = { ...webhook };
+  delete (view as Partial<WebhookRegistration>).secret;
+  return view;
 }
 
 router.post('/', (req: Request, res: Response) => {
@@ -45,30 +44,70 @@ router.post('/', (req: Request, res: Response) => {
     });
   }
 
-  const webhook = webhookService.register(
-    parsed.data.url,
-    keyPrefixOf(req),
-    { ...parsed.data.trigger, asset: parsed.data.trigger.asset.toUpperCase() },
-  );
+  let webhook: WebhookRegistration;
+  try {
+    webhook = webhookService.register(
+      parsed.data.url,
+      keyPrefixOf(req),
+      { ...parsed.data.trigger, asset: parsed.data.trigger.asset.toUpperCase() },
+    );
+  } catch (err) {
+    if (!isSsrfError(err)) throw err;
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'INVALID_WEBHOOK_URL',
+        message: describeUrlRejection(err),
+        reason: err.reason,
+      },
+    });
+  }
 
   res.status(201).json({
     success: true,
     data: {
-      ...withLinks(webhook, links.webhook(webhook.id)),
-      verificationKey: webhook.verificationKey,
+      ...withLinks(publicView(webhook), links.webhook(webhook.id)),
+      secret: webhook.secret,
+      secretReturnedOnce: true,
       status: webhook.status,
       failureCount: webhook.failureCount,
+      signature: {
+        algorithm: WEBHOOK_SIGNATURE_ALGORITHM,
+        header: WEBHOOK_SIGNATURE_HEADER,
+        format: WEBHOOK_SIGNATURE_FORMAT,
+      },
+      message: 'Store the secret now: it is returned only in this response and is never readable again.',
     },
   });
 });
 
 router.get('/', (req: Request, res: Response) => {
-  const data = webhookService.list(keyPrefixOf(req)).map((w: WebhookRegistration) => withLinks(w, links.webhook(w.id)));
+  const data = webhookService.list(keyPrefixOf(req)).map((w: WebhookRegistration) => withLinks(publicView(w), links.webhook(w.id)));
   res.json({ success: true, data, _links: links.root() });
 });
 
 router.get('/verification-key', (_req: Request, res: Response) => {
-  res.json({ success: true, data: { verificationKey: crypto.createHash('sha256').update(process.env.WEBHOOK_SIGNING_SECRET || 'default').digest('hex') } });
+  res.json({
+    success: true,
+    data: {
+      algorithm: WEBHOOK_SIGNATURE_ALGORITHM,
+      signatureHeader: WEBHOOK_SIGNATURE_HEADER,
+      signatureFormat: WEBHOOK_SIGNATURE_FORMAT,
+      signedPayload:
+        'The exact raw request body bytes (UTF-8) as delivered: JSON.stringify({ webhookId, ...payload }) with no spaces. Hash the bytes you received, never a re-serialised object.',
+      signingKey:
+        'Per-registration secret returned once by POST /api/v1/webhooks as "secret". This endpoint never returns key material.',
+      verificationRecipe:
+        'signature = "sha256=" + hex(HMAC-SHA256(secret, rawBody)); compare with a timing-safe equality against the X-Webhook-Signature header.',
+      testVector: {
+        secret: 'test-secret-0000000000000000000000000000',
+        body: '{"webhookId":"00000000-0000-4000-8000-000000000001","asset":"XLM","price":0.42,"timestamp":1700000000}',
+        signature: 'd285bbf58d70eff02a911f8bc9d9ce12592898054e5b52f868f7b1b53844c081',
+        headerValue: 'sha256=d285bbf58d70eff02a911f8bc9d9ce12592898054e5b52f868f7b1b53844c081',
+      },
+      docs: 'docs/webhooks.md',
+    },
+  });
 });
 
 router.get('/dead-letters', asyncRoute(async (req, res) => {
@@ -127,7 +166,7 @@ router.get('/:id', (req: Request, res: Response) => {
     notFound(res);
     return;
   }
-  res.json({ success: true, data: withLinks(webhook, links.webhook(webhook.id)) });
+  res.json({ success: true, data: withLinks(publicView(webhook), links.webhook(webhook.id)) });
 });
 
 router.delete('/:id', (req: Request, res: Response) => {

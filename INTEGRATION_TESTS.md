@@ -119,7 +119,7 @@ Tests respect these environment variables:
 ```bash
 API_URL=http://localhost:3000/api/v1          # API base URL
 WS_URL=ws://localhost:3001                    # WebSocket URL
-AGGREGATOR_URL=http://localhost:4000           # Aggregator health check
+AGGREGATOR_URL=http://localhost:4002           # Aggregator health check
 ```
 
 ## CI/CD Integration
@@ -151,7 +151,7 @@ tail -f services/aggregator/logs/aggregator.log
 ## Common Issues
 
 ### Services Not Starting
-- Check ports are available (3000, 3001, 4000, 5432)
+- Check ports are available (3000, 3001, 4001, 4002, 5432)
 - Verify docker daemon is running
 - Check logs for startup errors
 

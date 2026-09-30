@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import { config } from './infrastructure/config';
 import { corsManager } from './governance/cors-manager';
@@ -17,6 +16,7 @@ import { httpsRedirect, hstsHeaders } from './infrastructure/https';
 import { compressionMiddleware } from './infrastructure/compression';
 import { usageTrackingMiddleware } from './governance/usage-tracking';
 import { complianceAuditMiddleware } from './governance/compliance';
+import { distributedRateLimiter } from './platform/rate-limiter';
 import { PriceWebSocketServer } from './infrastructure/server';
 import { swaggerSpec } from './infrastructure/openapi';
 import v1Routes, { initializeCache } from './price-serving/v1';
@@ -30,8 +30,6 @@ import { DataConsistencyChecker } from './infrastructure/data-consistency';
 import { BackupService } from './infrastructure/backup';
 import { setDatabase } from './price-serving/price-store';
 import { initializeTracing } from './observability/tracing';
-import { AppError } from './infrastructure/app-error';
-import { ErrorCode } from './infrastructure/catalog';
 import platformRoutes from './platform/routes';
 import adminRoutes from './governance/admin';
 import selfServiceRoutes from './governance/self-service';
@@ -42,11 +40,10 @@ import eventRoutes from './routes/events';
 import governanceRoutes from './governance/proposal-routes';
 import { uptimeTracker } from './observability/uptime-tracker';
 import { getVaultClient } from '@stellar-oracle/vault-client';
-import { apiKeyManager, bootstrapApiKeyStore } from './governance/api-key-manager';
-import { startAuditRetentionScheduler, stopAuditRetentionScheduler } from './governance/audit-logger';
+import { apiKeyManager } from './governance/api-key-manager';
+import { initializeAuditIntegrity, startAuditChainVerification } from './governance/audit-logger';
 import webhooksRoutes from './webhooks/webhooks';
-import { webhookService } from './webhooks/webhook-service';
-import graphqlRoutes from './graphql';
+import graphqlRoutes, { initializeGraphqlCache } from './graphql';
 import releaseNotesRoutes from './release-notes/router';
 
 // Initialize distributed tracing
@@ -62,26 +59,73 @@ let consistencyChecker: DataConsistencyChecker | null = null;
 let backupService: BackupService | null = null;
 
 async function initializeApp(): Promise<void> {
+  // Load API keys from the shared store (issue #591); env keys only seed an
+  // empty store, and an unreachable store fails validation closed.
+  await apiKeyManager.initialize();
+  apiKeyManager.startRefresh();
+
   // Initialize Vault for API key and webhook secret management
   try {
     const vault = getVaultClient();
     await vault.initialize();
 
-    // Load API keys from Vault; seed from environment if Vault is empty
-    const vaultKeys = await vault.loadApiKeys();
-    if (vaultKeys && Object.keys(vaultKeys).length > 0) {
-      logger.info(`Loaded ${Object.keys(vaultKeys).length} API keys from Vault`);
-      apiKeyManager.loadKeysFromVault(vaultKeys);
-    } else {
-      // Keys loaded from env in the ApiKeyManager constructor already.
-      // If any keys exist in memory, back them up to Vault.
-      const memKeys = apiKeyManager.exportKeysForVault();
-      if (Object.keys(memKeys).length > 0) {
-        await vault.saveApiKeys(memKeys);
-        logger.info(`Seeded ${Object.keys(memKeys).length} API keys into Vault`);
+    // API keys: the store is authoritative. Boot loads it, reports
+    // environment-seed conflicts, merges, and seeds anything missing; every
+    // later mutation is written through before its response is sent.
+    try {
+      apiKeyManager.setStore({
+        load: () => vault.loadApiKeys(),
+        save: (keys) => vault.saveApiKeys(keys),
+      });
+      const keyBoot = await apiKeyManager.hydrate();
+      if (keyBoot.conflicts.length > 0) {
+        logger.warn(
+          `API key store vs environment seed conflicts: ${keyBoot.conflicts
+            .map((c) => `${c.keyPrefix} (env ${c.envHash.substring(0, 12)} vs store ${c.storeHash.substring(0, 12)})`)
+            .join('; ')}`,
+        );
       }
+      if (keyBoot.seeded > 0) {
+        logger.info(`Seeded ${keyBoot.seeded} API key(s) into the key store (${keyBoot.loaded} loaded)`);
+      }
+    } catch (keyErr) {
+      apiKeyManager.setStore(null);
+      logger.warn('API key store unavailable at startup — API keys stay in memory and mutations are not persisted', keyErr);
     }
     logger.info('Vault secrets engine initialized');
+
+    corsManager.setStore({
+      load: async () => {
+        const data = await vault.readSecret<{ origins?: string[] }>('secret/data/cors/origins');
+        if (!data || !Array.isArray(data.origins)) return [];
+        return data.origins.filter((o): o is string => typeof o === 'string');
+      },
+      save: async (origins: string[]) => {
+        await vault.writeSecret('secret/data/cors/origins', { origins });
+      },
+    });
+    await corsManager.hydrate();
+    const corsRefreshTimer = setInterval(() => {
+      corsManager.hydrate().catch((err) => logger.warn('CORS allowlist refresh failed', err));
+    }, 30_000);
+    corsRefreshTimer.unref();
+
+    setDsarStore({
+      load: async (): Promise<DsarRecord[]> => {
+        const data = await vault.readSecret<{ requests?: DsarRecord[] }>('secret/data/compliance/dsars');
+        if (!data || !Array.isArray(data.requests)) return [];
+        return data.requests;
+      },
+      save: async (records) => {
+        await vault.writeSecret('secret/data/compliance/dsars', { requests: records });
+      },
+    });
+    await hydrateDsars();
+
+    const keyRefreshTimer = setInterval(() => {
+      apiKeyManager.refreshFromStore().catch((err: unknown) => logger.warn('API key store refresh failed', err));
+    }, 30_000);
+    keyRefreshTimer.unref();
   } catch (err) {
     logger.warn('Vault not available — using in-memory API key store fallback', err);
   }
@@ -153,6 +197,7 @@ const cache = new HybridCache<unknown>(logger, {
 initializeCache(cache);
 initializeCacheV2(cache);
 initializeSandboxCache(cache);
+initializeGraphqlCache(cache);
 
 app.use(helmet());
 app.use(cors(corsManager.getCorsOptions()));
@@ -170,24 +215,7 @@ app.use(requestLogger);
 app.use(metricsMiddleware);
 app.use(usageTrackingMiddleware);
 app.use(complianceAuditMiddleware);
-app.use(
-  rateLimit({
-    windowMs: config.rateLimitWindowMs,
-    max: config.rateLimitMax,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => req.path === '/metrics',
-    handler: (req, res) => {
-      const error = new AppError(
-        ErrorCode.RATE_LIMITED,
-        'Too many requests. Please try again later.',
-        undefined,
-        req.path,
-      );
-      res.status(error.status).json(error.toResponseObject());
-    },
-  }),
-);
+app.use(distributedRateLimiter);
 
 // Apply authentication to price endpoints
 app.use('/api/v1/prices', authMiddleware);
@@ -238,6 +266,9 @@ app.use(errorHandler);
 
 async function startServer(): Promise<void> {
   await initializeApp();
+
+  initializeAuditIntegrity();
+  startAuditChainVerification();
 
   const startupDurationMs = Date.now() - startupStartedAt;
   serviceStartupDurationMs.set({ service: 'api' }, startupDurationMs);

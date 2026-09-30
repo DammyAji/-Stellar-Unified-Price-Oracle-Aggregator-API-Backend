@@ -119,7 +119,7 @@ onchain_heartbeat_alerts_total                 # Heartbeat alerts
 curl http://localhost:3000/metrics | grep http_requests_total
 
 # Aggregator metrics
-curl http://localhost:4000/metrics | grep oracle_source
+curl http://localhost:4002/metrics | grep oracle_source
 
 # Database metrics (if exposed)
 curl http://localhost:5432/metrics 2>/dev/null || echo "Not exposed on 5432"
