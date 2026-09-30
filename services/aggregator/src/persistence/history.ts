@@ -16,7 +16,12 @@ export interface HistoricalPriceEntry {
   timestamp: number;
 }
 
-export const DATA_DIR = path.resolve(__dirname, '../../data');
+// HISTORY_DIR lets the integration-test orchestrator point both services at the
+// same directory without a filesystem symlink. Falls back to the default
+// relative path when the variable is absent so existing deployments are unaffected.
+export const DATA_DIR = process.env.HISTORY_DIR
+  ? path.resolve(process.env.HISTORY_DIR)
+  : path.resolve(__dirname, '../../data');
 export const QUARANTINE_DIR = path.join(DATA_DIR, 'quarantine');
 export const HISTORY_FILE = (asset: string) => path.join(DATA_DIR, `history-${asset.toLowerCase()}.json`);
 
