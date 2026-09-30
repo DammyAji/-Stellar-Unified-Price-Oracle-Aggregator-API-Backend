@@ -13,17 +13,29 @@ import * as path from 'path';
 
 vi.mock('fs', () => {
   const mockFiles = new Map<string, string>();
+  const existsSync = vi.fn((p: string) => mockFiles.has(p));
+  const writeFileSync = vi.fn((p: string, data: string) => { mockFiles.set(p as string, data); });
+  const readFileSync = vi.fn((p: string) => mockFiles.get(p) || '[]');
+  // Atomic writes (issue #579) rename the temp file onto the target path, so
+  // the mock's rename moves the temp entry instead of leaving it behind.
+  const renameSync = vi.fn((oldPath: string, newPath: string) => {
+    if (!mockFiles.has(oldPath)) throw new Error(`ENOENT: ${oldPath}`);
+    mockFiles.set(newPath, mockFiles.get(oldPath)!);
+    mockFiles.delete(oldPath);
+  });
   return {
     default: {
-      existsSync: vi.fn((p: string) => mockFiles.has(p)),
+      existsSync,
       mkdirSync: vi.fn(),
-      writeFileSync: vi.fn((p: string, data: string) => { mockFiles.set(p, data); }),
-      readFileSync: vi.fn((p: string) => mockFiles.get(p) || '[]'),
+      writeFileSync,
+      readFileSync,
+      renameSync,
     },
-    existsSync: vi.fn((p: string) => mockFiles.has(p)),
+    existsSync,
     mkdirSync: vi.fn(),
-    writeFileSync: vi.fn((p: string, data: string) => { mockFiles.set(p, data); }),
-    readFileSync: vi.fn((p: string) => mockFiles.get(p) || '[]'),
+    writeFileSync,
+    readFileSync,
+    renameSync,
   };
 });
 
