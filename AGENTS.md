@@ -162,36 +162,45 @@ Run from the repository root unless stated otherwise.
 ### Integration tests
 
 `api/tests/integration.test.ts`, `v2-assets.test.ts` and `v2-batch-prices.test.ts`
-are gated behind `RUN_INTEGRATION_TESTS` and need a running stack, so they are
-not part of `npm run test:backend`. The CI `api-integration` job runs them
-against a fully local stack (stub oracle + aggregator + API, no database, no
-network).
-
-To run them locally, build first and then reproduce that job:
+are gated behind `RUN_INTEGRATION_TESTS` and need a running stack. Run them
+locally with a single command from the repository root:
 
 ```
-npm ci && npm run build:backend
-node scripts/stub-oracle-server.mjs &                 # stub upstream oracle APIs
-rm -rf api/data && ln -s "$PWD/services/aggregator/data" api/data
-cd services/aggregator && SSRF_ALLOW_PRIVATE_IPS=true WS_REQUIRE_ORIGIN=false \
-  PORT=4000 POLLING_INTERVAL_MS=5000 WATCHED_ASSETS=XLM,USDC \
-  CHAINLINK_BASE_URL=http://localhost:4010 REDSTONE_BASE_URL=http://localhost:4010 \
-  BAND_BASE_URL=http://localhost:4010 REFLECTOR_BASE_URL=http://localhost:4010 \
-  node dist/index.js &
-cd ../../api && API_PORT=3000 WS_PORT=3001 WS_REQUIRE_ORIGIN=false \
-  API_KEYS='test-key:10000:local:pro:viewer' node dist/index.js &
-cd .. && cd api && RUN_INTEGRATION_TESTS=1 TEST_API_KEY=test-key \
-  npx vitest run tests/integration.test.ts tests/v2-assets.test.ts tests/v2-batch-prices.test.ts
+npm run test:integration
 ```
 
-Two notes that trip this up:
+This calls `scripts/integration-test.mjs`, which:
 
-- `api/data` must point at `services/aggregator/data`. Each service resolves
-  its history directory relative to its own `dist` folder, so without the
-  symlink the API reads a different, usually empty, directory.
-- Requests to `/api/v1/prices` and `/api/v1/history` need an API key; without
-  one they return `401 MISSING_API_KEY`. Seed a key with the `API_KEYS`
-  variable, whose format is `key:rateLimit:description:tier:role`.
+1. Builds all backend packages (`npm run build:backend`).
+2. Starts `scripts/stub-oracle-server.mjs` as a stand-in for the four upstream
+   oracle APIs.
+3. Creates a hermetic temporary data directory shared by both services — no
+   manual symlink required (the `HISTORY_DIR` env var replaces the old
+   `rm -rf api/data && ln -s …` step).
+4. Boots the aggregator and API with the correct env, including a deterministic
+   `TEST_API_KEY` so requests never produce confusing `401 MISSING_API_KEY`
+   errors.
+5. Waits for the API `/api/v1/health` and the aggregator `/health` to return 200.
+6. Runs the three gated vitest files with `RUN_INTEGRATION_TESTS=1`.
+7. Tears down all child processes and removes the temporary data directory on
+   both success and failure — no orphaned node processes, no partial state.
+8. Propagates the vitest exit code.
+
+The CI `api-integration` job runs the same command (`npm run test:integration`)
+so contributors and CI always use the same entry point.
+
+To skip the build (e.g. when iterating quickly after a first `npm run build:backend`):
+
+```
+SKIP_BUILD=1 npm run test:integration
+```
+
+Two notes that previously tripped contributors up — now handled automatically:
+
+- **No symlink**: `HISTORY_DIR` points both services at the same temporary
+  directory; `api/data` is never touched.
+- **API key**: `TEST_API_KEY` defaults to `test-key` and is seeded automatically
+  via `API_KEYS`; the `401 MISSING_API_KEY` trap is gone.
 
 ### Rust toolchain
 

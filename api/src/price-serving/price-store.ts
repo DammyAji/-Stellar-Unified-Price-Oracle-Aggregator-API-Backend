@@ -9,7 +9,12 @@ import { ErrorCode } from '../infrastructure/catalog';
 import { logger } from '../observability/logger';
 import { historyFileReadFailuresTotal } from '../observability/metrics';
 
-const DATA_DIR = path.resolve(__dirname, '../../data');
+// HISTORY_DIR lets the integration-test orchestrator point both services at the
+// same directory without a filesystem symlink. Falls back to the default
+// relative path when the variable is absent so existing deployments are unaffected.
+const DATA_DIR = process.env.HISTORY_DIR
+  ? path.resolve(process.env.HISTORY_DIR)
+  : path.resolve(__dirname, '../../data');
 const HISTORY_FILE = (asset: string) => path.join(DATA_DIR, `history-${asset.toLowerCase()}.json`);
 let db: DatabaseClient | null = null;
 

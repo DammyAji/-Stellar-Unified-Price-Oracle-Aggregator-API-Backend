@@ -1,174 +1,146 @@
 # Integration Tests
 
-This document describes how to run and understand the integration tests for the Stellar Price Oracle system.
+Integration tests validate the full data pipeline end to end:
 
-## Overview
-
-Integration tests validate the full data pipeline:
-1. **Source Fetching** - Oracle sources (Chainlink, Redstone, Band, Reflector) fetch prices
-2. **Aggregation** - Prices are aggregated using median calculation
-3. **Storage** - Data is stored in PostgreSQL or file-based JSON
-4. **API Serving** - Prices are served via REST API and WebSocket
-5. **Alert Manager** - Price deviations and staleness are detected and alerted
+1. **Source Fetching** — a local stub replaces the four upstream oracle APIs
+   (Chainlink, Redstone, Band, Reflector) so tests never depend on external
+   network connectivity.
+2. **Aggregation** — the real aggregator polls the stub, computes the median,
+   and writes history files.
+3. **API Serving** — the real API reads the history files written by the
+   aggregator and serves them via REST.
 
 ## Running Integration Tests Locally
 
-### With Docker Compose
+From the repository root, run:
 
-The simplest way to run integration tests is using docker-compose:
-
-```bash
-# Start all services
-docker-compose -f docker-compose.test.yml up
-
-# In another terminal, run tests
-npm run test:integration
-
-# Tear down
-docker-compose -f docker-compose.test.yml down
-```
-
-### Manual Setup
-
-1. Start PostgreSQL:
-```bash
-docker run --name postgres-test \
-  -e POSTGRES_DB=stellar_oracle_test \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  postgres:16-alpine
-```
-
-2. Create tables:
-```bash
-psql -h localhost -U postgres -d stellar_oracle_test -f scripts/schema.sql
-```
-
-3. Start aggregator service:
-```bash
-cd services/aggregator
-npm install
-npm start
-```
-
-4. Start API service:
-```bash
-cd api
-npm install
-DATABASE_ENABLED=true \
-DATABASE_HOST=localhost \
-DATABASE_PORT=5432 \
-DATABASE_NAME=stellar_oracle_test \
-DATABASE_USER=postgres \
-DATABASE_PASSWORD=postgres \
-npm start
-```
-
-5. Run integration tests:
-```bash
-cd api
+```sh
 npm run test:integration
 ```
 
-## Test Categories
+That is the complete command. No symlinks, no hand-started processes, no
+manually injected API keys.
 
-### 1. Price API Endpoints
-- `GET /api/v1/prices` - All prices
-- `GET /api/v1/prices/:asset` - Specific asset price
-- `GET /api/v1/history/:asset` - Price history with filters
-- Contract ID format validation
+`scripts/integration-test.mjs` orchestrates the full sequence:
 
-### 2. Health Check Endpoints
-- `GET /api/v1/health` - API health status
-- `GET /api/v1/sources` - Available oracle sources
+| Step | What happens |
+|------|-------------|
+| 1 | Builds all backend packages (`npm run build:backend`) |
+| 2 | Starts the stub oracle server on port 4010 |
+| 3 | Creates a hermetic shared data directory in `$TMPDIR` |
+| 4 | Starts the aggregator pointing at the stub and the shared dir via `HISTORY_DIR` |
+| 5 | Starts the API pointing at the same shared dir via `HISTORY_DIR` |
+| 6 | Waits for `/api/v1/health` and the aggregator `/health` to return 200 |
+| 7 | Runs the three gated vitest test files with `RUN_INTEGRATION_TESTS=1` |
+| 8 | Kills all child processes and removes the temp directory (success **and** failure) |
+| 9 | Exits with the vitest exit code |
 
-### 3. WebSocket Real-Time Updates
-- Connection establishment
-- Price update reception
-- Message format validation
+### Skip the build step
 
-### 4. Data Pipeline Consistency
-- REST API and WebSocket data alignment
-- Timestamp consistency
-- Decimal precision
+If you have already built (`npm run build:backend`) and are iterating on the
+tests themselves, skip the rebuild:
 
-### 5. Error Handling
-- 404 for non-existent assets
-- 400 for invalid parameters
-- Proper error response format
-
-### 6. Performance and Caching
-- LRU cache hit rates
-- Response consistency
-- Cache invalidation
-
-### 7. Aggregator Service
-- Service availability
-- Health check endpoints
-- Source health status
-
-### 8. API Response Format
-- Success flag presence
-- Data/error mutual exclusivity
-- Timestamp inclusion
-
-## Test Configuration
-
-Tests respect these environment variables:
-
-```bash
-API_URL=http://localhost:3000/api/v1          # API base URL
-WS_URL=ws://localhost:3001                    # WebSocket URL
-AGGREGATOR_URL=http://localhost:4002           # Aggregator health check
+```sh
+SKIP_BUILD=1 npm run test:integration
 ```
 
-## CI/CD Integration
+### Environment variables
 
-Integration tests run automatically on:
-- Push to `main` or `develop` branches
-- Pull requests to `main` branch
+All are optional; the defaults match the CI job.
 
-See `.github/workflows/integration-tests.yml` for the CI configuration.
+| Variable | Default | Description |
+|---|---|---|
+| `SKIP_BUILD` | unset | Set to `1` to skip the build step |
+| `API_PORT` | `3000` | API HTTP port |
+| `WS_PORT` | `3001` | API WebSocket port |
+| `AGG_PORT` | `4000` | Aggregator base port (WS=+1, health=+2) |
+| `STUB_PORT` | `4010` | Stub oracle server port |
+| `TEST_API_KEY` | `test-key` | Injected into `API_KEYS`; passed to vitest as `TEST_API_KEY` |
+| `POLLING_INTERVAL_MS` | `1000` | Aggregator poll cadence |
+| `WATCHED_ASSETS` | `XLM,USDC` | Comma-separated assets the aggregator tracks |
+| `SSRF_ALLOW_PRIVATE_IPS` | `true` | Bypass the SSRF guard for loopback connections |
+| `WS_REQUIRE_ORIGIN` | `false` | Skip WebSocket Origin check in tests |
 
-## Debugging Tests
+## Test Files
 
-Enable debug output:
+The integration suite consists of three gated vitest files in `api/tests/`:
 
-```bash
-npm run test:integration -- --reporter=verbose
+| File | What it covers |
+|---|---|
+| `integration.test.ts` | Full data pipeline: price endpoints, WebSocket, aggregator health |
+| `v2-assets.test.ts` | v2 `/assets` endpoint — asset discovery and metadata |
+| `v2-batch-prices.test.ts` | v2 `/prices/batch` — batch price queries |
+
+All three use `describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)` so they are
+excluded from the ordinary `npm run test:api` run.
+
+## CI
+
+The `api-integration` job in `.github/workflows/ci.yml` runs exactly the same
+command:
+
+```yaml
+- name: Run integration tests (build + stack + tests + teardown)
+  env:
+    SSRF_ALLOW_PRIVATE_IPS: 'true'
+    WS_REQUIRE_ORIGIN: 'false'
+    TEST_API_KEY: 'integration-ci-key'
+  run: npm run test:integration
 ```
 
-Check logs from services:
+CI and contributors use the same entry point and the same script.
 
-```bash
-# API logs
-tail -f logs/api-combined.log
+## Cleanup guarantees
 
-# Aggregator logs
-tail -f services/aggregator/logs/aggregator.log
+`scripts/integration-test.mjs` registers `process.on('exit')`, `SIGINT`, and
+`SIGTERM` handlers that:
+
+- Send `SIGTERM` to every child process (stub, aggregator, API).
+- Remove the shared temporary data directory.
+
+This means no orphaned node processes and no partially-written data survive a
+failure or a Ctrl-C.
+
+## Architecture note: why no symlink?
+
+The old setup required:
+
+```sh
+rm -rf api/data && ln -s "$PWD/services/aggregator/data" api/data
 ```
 
-## Common Issues
+because each service resolved its data directory relative to its own `dist`
+folder. The fix adds `HISTORY_DIR` support to both:
 
-### Services Not Starting
-- Check ports are available (3000, 3001, 4001, 4002, 5432)
-- Verify docker daemon is running
-- Check logs for startup errors
+- `services/aggregator/src/persistence/history.ts` — `DATA_DIR` reads from
+  `process.env.HISTORY_DIR` when set.
+- `api/src/price-serving/price-store.ts` — `DATA_DIR` reads from
+  `process.env.HISTORY_DIR` when set.
 
-### Database Connection Failures
-- Ensure PostgreSQL is running and accessible
-- Verify credentials match configuration
-- Check that required tables exist
+Both fall back to the original relative path when `HISTORY_DIR` is absent, so
+existing Docker deployments and the `docker-compose.yml` stack are unaffected.
 
-### WebSocket Connection Timeouts
-- Verify WebSocket server is running on port 3001
-- Check firewall rules
-- Ensure API service is healthy first
+## Debugging
 
-## Future Improvements
+To keep the child-process logs after a run, redirect them:
 
-- [ ] Add performance benchmarking tests
-- [ ] Add load testing scenarios
-- [ ] Add failure recovery tests
-- [ ] Add multi-asset aggregation tests
-- [ ] Add alert delivery verification tests
+```sh
+SKIP_BUILD=1 npm run test:integration 2>&1 | tee /tmp/integration-run.log
+```
+
+The script prefixes every log line with the service name (`[aggregator]`,
+`[api]`, `[stub-oracle]`, `[vitest]`) so you can filter:
+
+```sh
+grep '^\[aggregator\]' /tmp/integration-run.log
+```
+
+To test against a stack you started manually, boot the services first and then
+run only vitest:
+
+```sh
+RUN_INTEGRATION_TESTS=1 TEST_API_KEY=test-key \
+  npx vitest run api/tests/integration.test.ts \
+                 api/tests/v2-assets.test.ts \
+                 api/tests/v2-batch-prices.test.ts
+```
