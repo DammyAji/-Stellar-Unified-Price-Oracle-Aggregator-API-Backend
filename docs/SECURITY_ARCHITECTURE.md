@@ -214,6 +214,30 @@ characters.
 long-lived-key compromise, DB/dump leaks (see §2), and unrotated credentials
 after an incident.
 
+## 7. CORS allowlist
+
+**Where:** `api/src/governance/cors-manager.ts`, admin routes in
+`api/src/governance/admin.ts`, wired in `api/src/index.ts`.
+
+- **Fail closed:** an empty allowlist denies every cross-origin request.
+  Development-only `CORS_ALLOW_ANY=true` opts in to reflecting every origin
+  **with credentials disabled**.
+- **Patterns:** exact `http(s)` origins, `*.example.com` (apex plus
+  any-depth subdomains), or the literal `null`. The bare `*` cannot be
+  stored because responses are sent with `credentials: true`.
+- **Shared store:** the allowlist lives in Vault at
+  `secret/data/cors/origins`, so all replicas converge (30 s refresh) and
+  changes survive restarts; `/tmp/cors-origins.json` is only a local cache.
+  Changes go through `POST`/`DELETE /admin/cors/origins` (admin role), are
+  rolled back if the shared-store write fails, are audited
+  (`cors.allowlist.change`, with before/after state), and emit a
+  `cors-allowlist-changed` domain event.
+
+**Threats mitigated:** cross-origin credential theft against an
+unconfigured deployment, split-brain allowlists between replicas, silent
+reversion of allowlist changes during rollouts, and wildcard origins
+combined with credentialed responses.
+
 ## Consolidated threat model & mitigations
 
 | Threat | Affected control | Mitigation (implemented) | Verification |

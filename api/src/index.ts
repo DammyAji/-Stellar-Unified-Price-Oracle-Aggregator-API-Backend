@@ -64,21 +64,63 @@ async function initializeApp(): Promise<void> {
     const vault = getVaultClient();
     await vault.initialize();
 
-    // Load API keys from Vault; seed from environment if Vault is empty
-    const vaultKeys = await vault.loadApiKeys();
-    if (vaultKeys && Object.keys(vaultKeys).length > 0) {
-      logger.info(`Loaded ${Object.keys(vaultKeys).length} API keys from Vault`);
-      apiKeyManager.loadKeysFromVault(vaultKeys);
-    } else {
-      // Keys loaded from env in the ApiKeyManager constructor already.
-      // If any keys exist in memory, back them up to Vault.
-      const memKeys = apiKeyManager.exportKeysForVault();
-      if (Object.keys(memKeys).length > 0) {
-        await vault.saveApiKeys(memKeys);
-        logger.info(`Seeded ${Object.keys(memKeys).length} API keys into Vault`);
+    // API keys: the store is authoritative. Boot loads it, reports
+    // environment-seed conflicts, merges, and seeds anything missing; every
+    // later mutation is written through before its response is sent.
+    try {
+      apiKeyManager.setStore({
+        load: () => vault.loadApiKeys(),
+        save: (keys) => vault.saveApiKeys(keys),
+      });
+      const keyBoot = await apiKeyManager.hydrate();
+      if (keyBoot.conflicts.length > 0) {
+        logger.warn(
+          `API key store vs environment seed conflicts: ${keyBoot.conflicts
+            .map((c) => `${c.keyPrefix} (env ${c.envHash.substring(0, 12)} vs store ${c.storeHash.substring(0, 12)})`)
+            .join('; ')}`,
+        );
       }
+      if (keyBoot.seeded > 0) {
+        logger.info(`Seeded ${keyBoot.seeded} API key(s) into the key store (${keyBoot.loaded} loaded)`);
+      }
+    } catch (keyErr) {
+      apiKeyManager.setStore(null);
+      logger.warn('API key store unavailable at startup — API keys stay in memory and mutations are not persisted', keyErr);
     }
     logger.info('Vault secrets engine initialized');
+
+    corsManager.setStore({
+      load: async () => {
+        const data = await vault.readSecret<{ origins?: string[] }>('secret/data/cors/origins');
+        if (!data || !Array.isArray(data.origins)) return [];
+        return data.origins.filter((o): o is string => typeof o === 'string');
+      },
+      save: async (origins: string[]) => {
+        await vault.writeSecret('secret/data/cors/origins', { origins });
+      },
+    });
+    await corsManager.hydrate();
+    const corsRefreshTimer = setInterval(() => {
+      corsManager.hydrate().catch((err) => logger.warn('CORS allowlist refresh failed', err));
+    }, 30_000);
+    corsRefreshTimer.unref();
+
+    setDsarStore({
+      load: async (): Promise<DsarRecord[]> => {
+        const data = await vault.readSecret<{ requests?: DsarRecord[] }>('secret/data/compliance/dsars');
+        if (!data || !Array.isArray(data.requests)) return [];
+        return data.requests;
+      },
+      save: async (records) => {
+        await vault.writeSecret('secret/data/compliance/dsars', { requests: records });
+      },
+    });
+    await hydrateDsars();
+
+    const keyRefreshTimer = setInterval(() => {
+      apiKeyManager.refreshFromStore().catch((err: unknown) => logger.warn('API key store refresh failed', err));
+    }, 30_000);
+    keyRefreshTimer.unref();
   } catch (err) {
     logger.warn('Vault not available — using in-memory API key store fallback', err);
   }

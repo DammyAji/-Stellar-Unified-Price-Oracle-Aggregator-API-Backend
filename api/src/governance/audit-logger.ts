@@ -15,6 +15,7 @@ export type AuditEvent =
   | 'auth.success'
   | 'auth.failure'
   | 'auth.rate_limited'
+  | 'authz.denied'
   | 'admin.key_created'
   | 'admin.key_rotated'
   | 'admin.key_deactivated'

@@ -273,6 +273,13 @@ export const rateLimitRedisLatency = new client.Histogram({
 });
 register.registerMetric(rateLimitRedisLatency);
 
+export const rbacDeniedTotal = new client.Counter({
+  name: 'rbac_denied_total',
+  help: 'Authorization denials on admin/governance routes by role, route, and reason',
+  labelNames: ['role', 'route', 'reason'],
+});
+register.registerMetric(rbacDeniedTotal);
+
 export const pipelineStageLatencyMs = new client.Histogram({
   name: 'pipeline_stage_latency_ms',
   help: 'Latency budget for each stage of the price pipeline in milliseconds',

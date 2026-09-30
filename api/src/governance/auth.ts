@@ -4,6 +4,7 @@ import { apiKeyManager, type ApiKeyManager } from './api-key-manager';
 import { logger } from '../observability/logger';
 import { auditLog } from './audit-logger';
 import type { Role } from './rbac';
+import { isRole, denyAuthorization } from './rbac';
 import { decryptSecret } from './crypto';
 
 declare global {
@@ -167,19 +168,18 @@ export function adminAuthMiddleware(_adminKeyPrefix: string) {
       return;
     }
 
+    const metadata = validation.metadata!;
     const adminApiKey = process.env.ADMIN_API_KEY ? decryptSecret(process.env.ADMIN_API_KEY) : '';
-    const isAdmin = apiKeyManager.isAdminKey(apiKey) || adminApiKey === apiKey;
-    if (!isAdmin) {
-      logger.warn(`Unauthorized admin access: ${apiKey.substring(0, 8)}...`);
-      res.status(403).json({
-        success: false,
-        error: { code: 'FORBIDDEN', message: 'This operation requires admin privileges.' },
-      });
+    const role: Role = adminApiKey && adminApiKey === apiKey ? 'admin' : metadata.role;
+
+    if (!isRole(role)) {
+      denyAuthorization(req, res, 'unknown_role', 'API key has an unknown role and cannot be authorized');
       return;
     }
 
     req.apiKey = apiKey;
-    req.userRole = 'admin';
+    req.userRole = role;
+    req.apiKeyScopes = metadata.scopes;
     next();
   };
 }
