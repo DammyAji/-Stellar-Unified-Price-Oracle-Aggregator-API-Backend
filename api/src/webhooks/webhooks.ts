@@ -1,7 +1,9 @@
 import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { isSsrfError } from '@stellar-oracle/ssrf-guard';
 import { webhookService, type WebhookRegistration } from './webhook-service';
+import { describeUrlRejection } from './ssrf';
 import { links, withLinks } from '../price-serving/hypermedia';
 
 const router = Router();
@@ -28,11 +30,24 @@ router.post('/', (req: Request, res: Response) => {
     });
   }
 
-  const webhook = webhookService.register(
-    parsed.data.url,
-    keyPrefixOf(req),
-    { ...parsed.data.trigger, asset: parsed.data.trigger.asset.toUpperCase() },
-  );
+  let webhook: WebhookRegistration;
+  try {
+    webhook = webhookService.register(
+      parsed.data.url,
+      keyPrefixOf(req),
+      { ...parsed.data.trigger, asset: parsed.data.trigger.asset.toUpperCase() },
+    );
+  } catch (err) {
+    if (!isSsrfError(err)) throw err;
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'INVALID_WEBHOOK_URL',
+        message: describeUrlRejection(err),
+        reason: err.reason,
+      },
+    });
+  }
 
   res.status(201).json({
     success: true,

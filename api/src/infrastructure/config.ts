@@ -14,6 +14,38 @@ export function optionalSecretEnv(name: string): string | undefined {
   return value ? decryptSecret(value) : undefined;
 }
 
+function commaList(value?: string): string[] {
+  return (value || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * `WEBHOOK_ALLOWED_HOSTS_BY_TENANT` holds a JSON object mapping an API key
+ * prefix to the hosts that key's tenant may register. Unparsable or malformed
+ * values are ignored rather than silently widening the allowlist.
+ */
+function hostMapEnv(name: string): Record<string, string[]> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+
+  const out: Record<string, string[]> = {};
+  for (const [tenant, hosts] of Object.entries(parsed as Record<string, unknown>)) {
+    if (Array.isArray(hosts)) {
+      out[tenant.toLowerCase()] = hosts.map((host) => String(host).toLowerCase());
+    }
+  }
+  return out;
+}
+
 export const config = {
   sandbox: {
     enabled: process.env.SANDBOX_ENABLED === 'true',
@@ -145,5 +177,13 @@ export const config = {
     maxRetries: parseInt(process.env.WEBHOOK_MAX_RETRIES || '5', 10),
     timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS || '10000', 10),
     minIntervalMs: parseInt(process.env.WEBHOOK_MIN_INTERVAL_MS || '60000', 10),
+    // Egress policy for user-supplied webhook URLs (issue #600).
+    // HTTPS unless a development deployment explicitly opts out.
+    requireHttps: process.env.WEBHOOK_REQUIRE_HTTPS !== 'false',
+    allowPrivateIps: process.env.WEBHOOK_ALLOW_PRIVATE_IPS === 'true',
+    // Empty = any public host. Non-empty = exact-host allowlist.
+    allowedHosts: commaList(process.env.WEBHOOK_ALLOWED_HOSTS),
+    // Per-tenant narrowing of the allowlist, keyed by API key prefix.
+    allowedHostsByTenant: hostMapEnv('WEBHOOK_ALLOWED_HOSTS_BY_TENANT'),
   },
 };

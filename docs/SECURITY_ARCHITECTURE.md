@@ -16,12 +16,13 @@ is verified, and *which threats it mitigates*.  All code references are to
 
 | # | Control area | Implementation | Tests |
 |---|---|---|---|
-| 1 | SSRF protection | `services/aggregator/src/infrastructure/ssrf.ts` | `tests/ssrf-private-ip.test.ts`, `tests/ssrf-circuit-breaker.test.ts` |
+| 1 | SSRF protection | `packages/ssrf-guard` (shared policy), `services/aggregator/src/infrastructure/ssrf.ts` (oracle egress wiring) | `tests/ssrf-private-ip.test.ts`, `tests/ssrf-circuit-breaker.test.ts` |
 | 2 | Encryption at rest | `api/src/governance/crypto.ts`, aggregator crypto util, `scripts/encrypt-secret.ts`, `packages/vault-client` | `tests/encryption-at-rest.test.ts`, `tests/history-encryption.test.ts` |
 | 3 | API authentication | `api/src/governance/auth.ts`, `api/src/governance/api-key-manager.ts`, `api/src/governance/rbac.ts` | `api/tests/*` (auth, api-key, rate-limit suites) |
 | 4 | WebSocket signing & upgrade protection | `api/src/governance/ws-signing.ts`, `api/src/infrastructure/csrf.ts`, `api/src/infrastructure/upgrade-guard.ts`, `api/src/infrastructure/server.ts` | WS auth/CSRF/signing suites |
 | 5 | Input sanitization | `api/src/governance/sanitization.ts` | sanitization suites |
 | 6 | Secrets management | `scripts/encrypt-secret.ts`, `scripts/rotate-secrets.sh`, `api/src/infrastructure/config.ts` (`decryptSecret`), `packages/vault-client` | `tests/encryption-at-rest.test.ts`, `docs/security/secret-rotation.md` |
+| 7 | Webhook egress (user-supplied URLs) | `packages/ssrf-guard`, `api/src/webhooks/ssrf.ts`, `api/src/webhooks/webhook-service.ts` | `api/tests/ssrf-guard.test.ts`, `api/tests/webhook-ssrf.test.ts` |
 
 ```
                           ┌─────────────────────────────┐
@@ -46,7 +47,9 @@ is verified, and *which threats it mitigates*.  All code references are to
 
 ## 1. SSRF protection
 
-**Where:** `services/aggregator/src/infrastructure/ssrf.ts`, wired into
+**Where:** `packages/ssrf-guard` holds the policy, the CIDR blocklist and the
+secure DNS lookup; `services/aggregator/src/infrastructure/ssrf.ts` binds that
+policy to this service's config and logger and wires it into
 `src/infrastructure/http-client.ts` (all outbound oracle-source requests).
 
 The guard, applied before and during every outbound request, enforces:
@@ -214,11 +217,68 @@ characters.
 long-lived-key compromise, DB/dump leaks (see §2), and unrotated credentials
 after an incident.
 
+## 7. Webhook egress (issue #600)
+
+**Where:** `packages/ssrf-guard` (shared implementation),
+`api/src/webhooks/ssrf.ts` (policy + dispatcher),
+`api/src/webhooks/webhook-service.ts` (enforcement),
+`api/src/webhooks/webhooks.ts` (registration rejection).
+
+`POST /webhooks` accepts a URL chosen by the caller and the API later POSTs a
+signed payload to it. That is the only outbound destination in this codebase an
+attacker controls, so it runs the same guard as §1 — one implementation, two
+bindings — plus a webhook-specific refusal of redirects.
+
+Enforcement happens at three points:
+
+1. **Registration** (`WebhookService.register`, called by the route) — a
+   DNS-free static pass over protocol, HTTPS, the allowlist, statically
+   internal hostnames (`localhost`, `*.internal`, `*.cluster.local`,
+   `metadata.google.internal`, …) and IP literals, which the WHATWG URL parser
+   has already folded (`https://2130706433/` → `127.0.0.1`). A rejected URL
+   never becomes stored, so there is no stored-URL bypass.
+2. **Delivery** (`WebhookService.deliver`) — the same static pass runs again on
+   every attempt, so a URL whose tenant allowlist changed, or that predates the
+   control, is refused at delivery time. A refusal is terminal: the policy will
+   not un-refuse it, so it is not retried.
+3. **Connect time** — deliveries go through an undici dispatcher whose `lookup`
+   re-resolves the host for each attempt and refuses any answer in a private,
+   loopback, link-local or metadata range, handing the socket only a surviving
+   address. The address the policy approved is the address the request uses.
+
+**Redirects** are never followed: requests are made with `redirect: 'manual'`,
+so a `302` pointing at `169.254.169.254` is returned to us as a response and
+never fetched. The owner sees `redirect-not-followed`.
+
+**HTTPS** is required unless `WEBHOOK_REQUIRE_HTTPS=false`. **Private
+addresses** are refused unless `WEBHOOK_ALLOW_PRIVATE_IPS=true` (development
+only). **Destination allowlists** are set globally with
+`WEBHOOK_ALLOWED_HOSTS` and narrowed per tenant with
+`WEBHOOK_ALLOWED_HOSTS_BY_TENANT` (JSON, keyed by API key prefix); a tenant
+entry replaces the global list for that key and can only ever narrow it.
+
+**Error surfaces.** `WebhookRegistration.lastFailure` and
+`WebhookDeliveryLog.error` are drawn from a fixed vocabulary — `blocked-url`,
+`blocked-resolution`, `timeout`, `network-error`, `redirect-not-followed`,
+`HTTP <status>` — instead of the transport's message. Node and undici messages
+embed resolved addresses, ports and stack frames; a probe that reads
+`lastFailure` learns only which category refused it. The registration error
+(`INVALID_WEBHOOK_URL`) likewise reports a property of the URL the caller just
+submitted, never our surroundings.
+
+**Verification:** `api/tests/ssrf-guard.test.ts` (blocklist, forbidden
+hostnames, allowlist, connect-time rejection of a metadata answer, per-resolution
+policy) and `api/tests/webhook-ssrf.test.ts` (metadata/loopback/in-cluster
+registration rejections, route 400, delivery refusal without issuing a request,
+a real redirect test that proves the `Location` target is never fetched, and
+error-surface normalization).
+
 ## Consolidated threat model & mitigations
 
 | Threat | Affected control | Mitigation (implemented) | Verification |
 |---|---|---|---|
 | SSRF — internal metadata/service access via oracle-source URLs | §1 | Protocol allowlist, host allowlist, private-IP CIDR block, DNS-rebinding revalidation, circuit breaker | ssrf-private-ip / ssrf-circuit-breaker tests |
+| SSRF — internal metadata/service access via a registered webhook URL | §7 | Static validation at registration *and* delivery, HTTPS required, exact-host + per-tenant allowlist, connect-time private-IP refusal, redirects never followed, normalized failure surfaces | ssrf-guard / webhook-ssrf tests |
 | Data-at-rest theft (DB/backups/history) | §2 | AES-256-GCM `enc:v1:` payloads, per-key tagging, rotation with previous-key grace | encryption-at-rest / history-encryption tests |
 | Unauthenticated/unauthorized API access | §3 | Bearer/X-API-Key auth, SHA-256 hashed keys, RBAC roles, tiered rate limits | API auth + rate-limit suites |
 | Key exfiltration | §2, §3, §6 | Plaintext never stored; Vault-backed keys; startup decryption | encryption-at-rest, api-key tests |

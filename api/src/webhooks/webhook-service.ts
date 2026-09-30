@@ -1,7 +1,13 @@
 import crypto, { randomUUID } from 'crypto';
+import { validateOutboundUrl } from '@stellar-oracle/ssrf-guard';
 import { config } from '../infrastructure/config';
 import { logger } from '../observability/logger';
 import { getVaultClient } from '@stellar-oracle/vault-client';
+import {
+  classifyDeliveryError,
+  getWebhookDispatcher,
+  webhookSsrfPolicy,
+} from './ssrf';
 
 export type WebhookTriggerType = 'threshold' | 'interval';
 
@@ -75,6 +81,10 @@ class WebhookService {
     apiKeyPrefix: string,
     trigger: WebhookTrigger,
   ): WebhookRegistration {
+    // Rejected here rather than only in the route, so no other caller can store
+    // a URL that delivery would later refuse (the stored-URL bypass).
+    validateOutboundUrl(url, webhookSsrfPolicy(apiKeyPrefix));
+
     const secret = randomUUID();
     const verificationKey = crypto.createHash('sha256').update(secret).digest('hex');
     const webhook: WebhookRegistration = {
@@ -174,6 +184,29 @@ class WebhookService {
     const signature = signWebhookPayload(webhook.secret, body);
     let attempt = 0;
 
+    // Delivery-time re-check: a URL stored before the policy existed, or one
+    // whose host/tenant allowlist has since changed, must not be delivered.
+    // A refusal is terminal — the policy will not un-refuse it on retry.
+    try {
+      validateOutboundUrl(webhook.url, webhookSsrfPolicy(webhook.apiKeyPrefix));
+    } catch (err) {
+      const code = classifyDeliveryError(err);
+      webhook.lastFailure = code;
+      webhook.status = 'dead-letter';
+      webhook.failureCount += 1;
+      this.logDelivery({
+        id: randomUUID(),
+        webhookId: webhook.id,
+        url: webhook.url,
+        attempt: 0,
+        success: false,
+        error: code,
+        timestamp: Date.now(),
+      });
+      logger.warn(`Webhook ${webhook.id} delivery refused: ${code}`);
+      return;
+    }
+
     while (attempt < config.webhooks.maxRetries) {
       attempt += 1;
       try {
@@ -189,6 +222,11 @@ class WebhookService {
           },
           body,
           signal: controller.signal,
+          // Never follow. A 302 to an internal address would otherwise be
+          // fetched by undici without ever passing the connect-time lookup,
+          // which is the whole escape route this issue describes.
+          redirect: 'manual',
+          dispatcher: getWebhookDispatcher(),
         });
         clearTimeout(timeout);
 
@@ -210,12 +248,13 @@ class WebhookService {
           return;
         }
 
-        webhook.lastFailure = `HTTP ${res.status}`;
+        webhook.lastFailure =
+          res.status >= 300 && res.status < 400 ? 'redirect-not-followed' : `HTTP ${res.status}`;
         webhook.status = 'degraded';
         webhook.failureCount += 1;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        webhook.lastFailure = message;
+        const code = classifyDeliveryError(err);
+        webhook.lastFailure = code;
         webhook.status = 'degraded';
         webhook.failureCount += 1;
         this.logDelivery({
@@ -224,7 +263,7 @@ class WebhookService {
           url: webhook.url,
           attempt,
           success: false,
-          error: message,
+          error: code,
           timestamp: Date.now(),
         });
       }
