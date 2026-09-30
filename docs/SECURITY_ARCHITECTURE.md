@@ -215,36 +215,29 @@ characters.
 long-lived-key compromise, DB/dump leaks (see §2), and unrotated credentials
 after an incident.
 
-## 7. HTTPS redirect & proxy trust
+## 7. CORS allowlist
 
-**Where:** `api/src/infrastructure/https.ts` (mounted in production before all
-routes), sharing the trust model in `api/src/platform/trusted-proxy.ts`.
+**Where:** `api/src/governance/cors-manager.ts`, admin routes in
+`api/src/governance/admin.ts`, wired in `api/src/index.ts`.
 
-Trust assumptions:
+- **Fail closed:** an empty allowlist denies every cross-origin request.
+  Development-only `CORS_ALLOW_ANY=true` opts in to reflecting every origin
+  **with credentials disabled**.
+- **Patterns:** exact `http(s)` origins, `*.example.com` (apex plus
+  any-depth subdomains), or the literal `null`. The bare `*` cannot be
+  stored because responses are sent with `credentials: true`.
+- **Shared store:** the allowlist lives in Vault at
+  `secret/data/cors/origins`, so all replicas converge (30 s refresh) and
+  changes survive restarts; `/tmp/cors-origins.json` is only a local cache.
+  Changes go through `POST`/`DELETE /admin/cors/origins` (admin role), are
+  rolled back if the shared-store write fails, are audited
+  (`cors.allowlist.change`, with before/after state), and emit a
+  `cors-allowlist-changed` domain event.
 
-- The effective request scheme comes only from trusted inputs: the TLS socket
-  (`req.secure`) for direct connections, or `X-Forwarded-Proto` when the TCP
-  peer is listed in `TRUSTED_PROXY_IPS`. A client cannot influence it by
-  forging the header.
-- Redirects always target the canonical origin configured in `PUBLIC_BASE_URL`
-  (validated as an `https://` URL at use), never the request's `Host` header,
-  which eliminates open redirects and cache-poisoning via `Host`.
-- The `Host` header must match the allowlist: the `PUBLIC_BASE_URL` host plus
-  any entries in `PUBLIC_BASE_ALLOWED_HOSTS` (may include a port). An
-  unexpected host is rejected with `421`; if neither is configured there is no
-  allowlist to validate against.
-- Fail-closed policy: in production a plaintext request is redirected to
-  `PUBLIC_BASE_URL`, or rejected with `400` when no canonical origin is
-  configured. If a trusted proxy does not supply a parseable
-  `X-Forwarded-Proto`, the request is rejected (`400 SCHEME_UNDETERMINED`)
-  rather than served.
-- HSTS (`max-age=63072000; includeSubDomains; preload`) is emitted only when
-  the request is actually served over HTTPS, so a plaintext visitor never
-  receives an HSTS header for a spoofed host.
-
-**Threats mitigated:** open redirect / cache poisoning via forged `Host`,
-plaintext downgrade acceptance, HSTS injection over HTTP, and forged
-`X-Forwarded-Proto` from untrusted peers.
+**Threats mitigated:** cross-origin credential theft against an
+unconfigured deployment, split-brain allowlists between replicas, silent
+reversion of allowlist changes during rollouts, and wildcard origins
+combined with credentialed responses.
 
 ## Consolidated threat model & mitigations
 

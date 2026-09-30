@@ -20,6 +20,7 @@ describe('Admin: Dynamic CORS Configuration Endpoint', () => {
     if (fs.existsSync(testCorsFile)) {
       fs.unlinkSync(testCorsFile);
     }
+    vi.unstubAllEnvs();
   });
 
   describe('GET /admin/cors - List allowed origins', () => {
@@ -87,11 +88,12 @@ describe('Admin: Dynamic CORS Configuration Endpoint', () => {
       expect(origins).toContain('*.example.com');
     });
 
-    it('should support * wildcard for all origins', () => {
-      corsManager.addOrigin('*');
+    it('should reject the * wildcard because it would be sent with credentials', () => {
+      const result = corsManager.addOrigin('*');
 
-      const origins = corsManager.listOrigins();
-      expect(origins).toContain('*');
+      expect(result).toBe(false);
+      expect(corsManager.listOrigins()).not.toContain('*');
+      expect(corsManager.isAllowed('https://anything.example')).toBe(false);
     });
   });
 
@@ -161,11 +163,28 @@ describe('Admin: Dynamic CORS Configuration Endpoint', () => {
       expect(corsManager.isAllowed('https://other.com')).toBe(false);
     });
 
-    it('should allow all origins when * is configured', () => {
-      corsManager.addOrigin('*');
+    it('should fail closed when the allowlist is empty', () => {
+      expect(corsManager.listOrigins()).toHaveLength(0);
 
-      expect(corsManager.isAllowed('https://any.example.com')).toBe(true);
+      expect(corsManager.isAllowed('https://anywhere.example.com')).toBe(false);
+      expect(corsManager.isAllowed('null')).toBe(false);
+    });
+
+    it('should allow every origin only with the development-only CORS_ALLOW_ANY opt-in', () => {
+      vi.stubEnv('CORS_ALLOW_ANY', 'true');
+
+      expect(corsManager.isAllowed('https://anywhere.example.com')).toBe(true);
       expect(corsManager.isAllowed('https://random.com')).toBe(true);
+
+      const options = corsManager.getCorsOptions();
+      expect(options.origin).toBe(true);
+      expect(options.credentials).toBe(false);
+    });
+
+    it('should reject the * wildcard as a stored pattern while credentials are enabled', () => {
+      expect(corsManager.validateOrigin('*').valid).toBe(false);
+      expect(corsManager.addOrigin('*')).toBe(false);
+      expect(corsManager.getCorsOptions().credentials).toBe(true);
     });
 
     it('should return CORS options with configured origins', () => {
@@ -210,6 +229,40 @@ describe('Admin: Dynamic CORS Configuration Endpoint', () => {
       const origins = newManager.listOrigins();
 
       expect(origins).toContain('https://saved.com');
+    });
+  });
+
+  describe('Origin pattern validation', () => {
+    it('should accept absolute http(s) origins, wildcards, and the literal null', () => {
+      const valid = ['https://app.example.com', 'http://localhost:3000', '*.example.com', 'null'];
+      for (const pattern of valid) {
+        expect(corsManager.validateOrigin(pattern).valid, pattern).toBe(true);
+        expect(corsManager.addOrigin(pattern), pattern).toBe(true);
+      }
+
+      expect(corsManager.isAllowed('http://localhost:3000')).toBe(true);
+      expect(corsManager.isAllowed('null')).toBe(true);
+      expect(corsManager.isAllowed('https://deep.sub.example.com')).toBe(true);
+    });
+
+    it('should reject malformed, schemeless, path-bearing, and non-http origins', () => {
+      const invalid = [
+        'not a url',
+        'example.com',
+        'javascript:alert(1)',
+        'https://example.com/path',
+        'https://example.com?query=1',
+        '*.example.com/path',
+        'ftp://files.example.com',
+        '',
+      ];
+      for (const pattern of invalid) {
+        expect(corsManager.validateOrigin(pattern).valid, pattern).toBe(false);
+        expect(corsManager.addOrigin(pattern), pattern).toBe(false);
+      }
+
+      expect(corsManager.listOrigins()).toHaveLength(0);
+      expect(corsManager.isAllowed('https://example.com')).toBe(false);
     });
   });
 });

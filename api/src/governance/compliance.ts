@@ -4,6 +4,16 @@ import path from 'path';
 import { Router, Request, Response, NextFunction } from 'express';
 import { listLineage } from '../platform/lineage';
 import { getIncidentDisclosurePolicy } from '../platform/self-healing';
+import { logger } from '../observability/logger';
+import { authMiddleware } from './auth';
+import { requireRole } from './rbac';
+import {
+  FileDsarStore,
+  type DsarRecord,
+  type DsarRequestType,
+  type DsarStatus,
+  type DsarStore,
+} from './dsar-store';
 
 type AuditResult = 'success' | 'failure' | 'denied';
 
@@ -26,31 +36,30 @@ interface RetentionPolicy {
   retentionDays: number;
   action: 'delete' | 'archive';
   store: string;
-}
-
-interface DataSubjectRequest {
-  id: string;
-  subjectId: string;
-  requestType: 'access' | 'erasure' | 'explanation';
-  status: 'received' | 'processing' | 'fulfilled' | 'rejected';
-  createdAt: string;
-  fulfilledAt?: string;
-  stores: string[];
-  notes?: string[];
-  result?: Record<string, unknown>;
+  enforcement: 'automatic' | 'external';
 }
 
 const router = Router();
 const auditEntries: ComplianceAuditEntry[] = [];
-const dataSubjectRequests = new Map<string, DataSubjectRequest[]>();
-const auditLogPath = path.resolve(process.cwd(), 'logs/compliance-audit.jsonl');
 let previousHash = '0'.repeat(64);
 
+function complianceLogDir(): string {
+  return process.env.COMPLIANCE_LOG_DIR || path.resolve(process.cwd(), 'logs');
+}
+
+function complianceAuditPath(): string {
+  return path.join(complianceLogDir(), 'compliance-audit.jsonl');
+}
+
+function complianceAuditArchivePath(): string {
+  return path.join(complianceLogDir(), 'compliance-audit-archive.jsonl');
+}
+
 const retentionPolicies: RetentionPolicy[] = [
-  { dataType: 'price_data', retentionDays: 2555, action: 'archive', store: 'price_history' },
-  { dataType: 'audit_logs', retentionDays: 1095, action: 'archive', store: 'compliance_audit_log' },
-  { dataType: 'debug_logs', retentionDays: 90, action: 'delete', store: 'debug_logs' },
-  { dataType: 'raw_source_payloads', retentionDays: 90, action: 'archive', store: 'raw_source_payloads' },
+  { dataType: 'price_data', retentionDays: 2555, action: 'archive', store: 'price_history', enforcement: 'external' },
+  { dataType: 'audit_logs', retentionDays: 1095, action: 'archive', store: 'compliance_audit_log', enforcement: 'automatic' },
+  { dataType: 'debug_logs', retentionDays: 90, action: 'delete', store: 'debug_logs', enforcement: 'automatic' },
+  { dataType: 'raw_source_payloads', retentionDays: 90, action: 'archive', store: 'raw_source_payloads', enforcement: 'external' },
 ];
 
 export const keyCustodyPolicy = {
@@ -81,40 +90,242 @@ export const keyCustodyPolicy = {
   changeFlow: ['propose', 'review', 'approve', 'timelock', 'execute', 'record'],
 };
 
-export function getDataSubjectRequests(subjectId: string): DataSubjectRequest[] {
-  return dataSubjectRequests.get(subjectId) || [];
+const dsarById = new Map<string, DsarRecord>();
+let dsarStore: DsarStore = new FileDsarStore();
+let dsarHydrated = false;
+
+export function setDsarStore(store: DsarStore): void {
+  dsarStore = store;
+  dsarHydrated = false;
 }
 
-function ensureRequestList(subjectId: string): DataSubjectRequest[] {
-  if (!dataSubjectRequests.has(subjectId)) {
-    dataSubjectRequests.set(subjectId, []);
+export async function hydrateDsars(): Promise<void> {
+  if (dsarHydrated) return;
+  try {
+    const records = await dsarStore.load();
+    dsarById.clear();
+    for (const record of records) {
+      dsarById.set(record.id, record);
+    }
+    dsarHydrated = true;
+    logger.info(`Hydrated ${dsarById.size} data-subject request(s) from the DSAR store`);
+  } catch (err) {
+    logger.warn('Failed to hydrate data-subject request state', err);
   }
-  return dataSubjectRequests.get(subjectId)!;
 }
 
-function createDataSubjectRequest(subjectId: string, requestType: DataSubjectRequest['requestType'], req: Request): DataSubjectRequest {
-  const request: DataSubjectRequest = {
+async function ensureDsarHydrated(): Promise<void> {
+  if (!dsarHydrated) await hydrateDsars();
+}
+
+function snapshotDsars(): DsarRecord[] {
+  return [...dsarById.values()].map((record) => ({
+    ...record,
+    history: [...record.history],
+    ...(record.notes && { notes: [...record.notes] }),
+    ...(record.stores && { stores: [...record.stores] }),
+  }));
+}
+
+async function persistDsars(mutate: () => void): Promise<void> {
+  await ensureDsarHydrated();
+  const snapshot = snapshotDsars();
+  mutate();
+  try {
+    await dsarStore.save(snapshotDsars());
+  } catch (err) {
+    dsarById.clear();
+    for (const record of snapshot) {
+      dsarById.set(record.id, record);
+    }
+    throw err;
+  }
+}
+
+export function getDataSubjectRequests(subjectId: string): DsarRecord[] {
+  return [...dsarById.values()].filter((record) => record.subjectId === subjectId);
+}
+
+function actorOf(req: Request): string {
+  return req.apiKey ? req.apiKey.substring(0, 8) : 'anonymous';
+}
+
+async function createDataSubjectRequest(
+  subjectId: string,
+  requestType: DsarRequestType,
+  req: Request,
+): Promise<DsarRecord> {
+  const now = new Date().toISOString();
+  const record: DsarRecord = {
     id: crypto.randomUUID(),
     subjectId,
     requestType,
     status: 'received',
-    createdAt: new Date().toISOString(),
+    owner: actorOf(req),
+    createdAt: now,
+    updatedAt: now,
     stores: retentionPolicies.map((policy) => policy.store),
     notes: [`Created via ${req.method} ${req.originalUrl || req.path}`],
+    history: [{ at: now, actor: actorOf(req), from: 'created', to: 'received' }],
   };
-  ensureRequestList(subjectId).push(request);
-  return request;
+  await persistDsars(() => {
+    dsarById.set(record.id, record);
+  });
+  return record;
 }
 
-const soc2Controls = [
-  { id: 'CC6.1', name: 'Logical access', status: 'partial', evidence: ['api-key-manager', 'rbac'] },
-  { id: 'CC6.6', name: 'Transmission security', status: 'partial', evidence: ['httpsRedirect', 'hstsHeaders'] },
-  { id: 'CC7.2', name: 'Monitoring', status: 'partial', evidence: ['metrics', 'usage-anomalies', 'audit-log'] },
-  { id: 'CC7.4', name: 'Incident response', status: 'partial', evidence: ['incident-playbook-required'] },
-  { id: 'CC8.1', name: 'Change management', status: 'partial', evidence: ['ci-workflow'] },
-  { id: 'A1.2', name: 'Capacity management', status: 'partial', evidence: ['metrics'] },
-  { id: 'A1.3', name: 'Backup and recovery', status: 'partial', evidence: ['backup-service'] },
+function findDsar(subjectId: string, requestId: string): DsarRecord | null {
+  const record = dsarById.get(requestId);
+  if (!record || record.subjectId !== subjectId) return null;
+  return record;
+}
+
+const dsarTransitions: Record<DsarStatus, DsarStatus[]> = {
+  received: ['processing', 'rejected'],
+  processing: ['fulfilled', 'rejected'],
+  fulfilled: [],
+  rejected: [],
+};
+
+function applyTransition(record: DsarRecord, to: DsarStatus, actor: string, note?: string): void {
+  const from = record.status;
+  record.status = to;
+  record.updatedAt = new Date().toISOString();
+  if (to === 'fulfilled') record.fulfilledAt = record.updatedAt;
+  record.history.push({
+    at: record.updatedAt,
+    actor,
+    from,
+    to,
+    ...(note && { note }),
+  });
+}
+
+interface Soc2CheckResult {
+  status: 'implemented' | 'partial' | 'gap';
+  evidence: string[];
+  detail?: string;
+}
+
+interface Soc2Control {
+  id: string;
+  name: string;
+  verification: 'automated' | 'manual';
+  status: 'implemented' | 'partial' | 'gap';
+  evidence: string[];
+  check?: () => Soc2CheckResult;
+  lastCheckedAt?: string;
+  lastResult?: { status: Soc2CheckResult['status']; detail?: string; evidence: string[] };
+}
+
+function repoFile(relative: string): string | null {
+  const candidates = [
+    path.resolve(process.cwd(), relative),
+    path.resolve(process.cwd(), '..', relative),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function apiFile(relative: string): string | null {
+  const candidates = [
+    path.resolve(process.cwd(), relative),
+    path.resolve(process.cwd(), 'api', relative),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function checkAdminRouteGuards(): Soc2CheckResult {
+  const file = apiFile('src/governance/admin.ts');
+  if (!file) {
+    return { status: 'gap', evidence: [], detail: 'src/governance/admin.ts not found' };
+  }
+  const routeLines = fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((line) => /^\s*router\.(get|post|put|patch|delete)\(/.test(line));
+  const unguarded = routeLines.filter((line) => !line.includes('requireRole('));
+  if (routeLines.length === 0) {
+    return { status: 'gap', evidence: [file], detail: 'no admin routes found' };
+  }
+  return {
+    status: unguarded.length === 0 ? 'implemented' : 'gap',
+    evidence: [`${routeLines.length} admin route declaration(s) in src/governance/admin.ts`],
+    detail:
+      unguarded.length === 0
+        ? 'every admin route declares requireRole(minRole, permission)'
+        : `${unguarded.length} admin route(s) without requireRole`,
+  };
+}
+
+function checkAuditFindings(): Soc2CheckResult {
+  const file = repoFile('docs/security/audit-findings.md');
+  if (!file) {
+    return { status: 'gap', evidence: [], detail: 'docs/security/audit-findings.md not found' };
+  }
+  const rows = fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().startsWith('|'))
+    .map((line) =>
+      line.split('|').map((cell) => cell.trim()).filter((_, i, arr) => i > 0 && i < arr.length - 1),
+    );
+  const dataRows = rows.slice(2).filter((cells) => cells.length >= 4 && !/^-+$/.test(cells[0]));
+  const openCritical = dataRows.filter(
+    (cells) => cells[1]?.toLowerCase() === 'critical' && cells[3]?.toLowerCase() !== 'resolved',
+  );
+  return {
+    status: openCritical.length === 0 ? 'implemented' : 'gap',
+    evidence: ['scripts/check-audit-findings.js', 'docs/security/audit-findings.md'],
+    detail:
+      openCritical.length === 0
+        ? 'no open Critical audit findings'
+        : `${openCritical.length} open Critical audit finding(s)`,
+  };
+}
+
+function checkCiWorkflow(): Soc2CheckResult {
+  const file = repoFile('.github/workflows/ci.yml');
+  if (!file) {
+    return { status: 'gap', evidence: [], detail: '.github/workflows/ci.yml not found' };
+  }
+  return { status: 'implemented', evidence: ['.github/workflows/ci.yml'], detail: 'CI workflow present' };
+}
+
+const soc2Controls: Soc2Control[] = [
+  { id: 'CC6.1', name: 'Logical access', verification: 'automated', status: 'partial', evidence: ['api-key-manager', 'rbac'], check: checkAdminRouteGuards },
+  { id: 'CC6.6', name: 'Transmission security', verification: 'manual', status: 'partial', evidence: ['httpsRedirect', 'hstsHeaders'] },
+  { id: 'CC7.2', name: 'Monitoring', verification: 'automated', status: 'partial', evidence: ['metrics', 'usage-anomalies', 'audit-log'], check: checkAuditFindings },
+  { id: 'CC7.4', name: 'Incident response', verification: 'manual', status: 'partial', evidence: ['incident-playbook-required'] },
+  { id: 'CC8.1', name: 'Change management', verification: 'automated', status: 'partial', evidence: ['ci-workflow'], check: checkCiWorkflow },
+  { id: 'A1.2', name: 'Capacity management', verification: 'manual', status: 'partial', evidence: ['metrics'] },
+  { id: 'A1.3', name: 'Backup and recovery', verification: 'manual', status: 'partial', evidence: ['backup-service'] },
 ];
+
+function evaluateSoc2Controls(): Soc2Control[] {
+  return soc2Controls.map((control) => {
+    if (control.verification !== 'automated' || !control.check) return { ...control };
+    const result = control.check();
+    return {
+      ...control,
+      status: result.status,
+      lastCheckedAt: new Date().toISOString(),
+      lastResult: { status: result.status, ...(result.detail && { detail: result.detail }), evidence: result.evidence },
+    };
+  });
+}
+
+function controlsByVerification(controls: Soc2Control[]): Record<string, number> {
+  return {
+    automated: controls.filter((control) => control.verification === 'automated').length,
+    manual: controls.filter((control) => control.verification === 'manual').length,
+  };
+}
 
 interface RecurringReport {
   id: string;
@@ -152,8 +363,8 @@ function hashEntry(entry: Omit<ComplianceAuditEntry, 'hash'>): string {
 
 function persistAuditEntry(entry: ComplianceAuditEntry): void {
   try {
-    fs.mkdirSync(path.dirname(auditLogPath), { recursive: true });
-    fs.appendFileSync(auditLogPath, `${JSON.stringify(entry)}\n`);
+    fs.mkdirSync(path.dirname(complianceAuditPath()), { recursive: true });
+    fs.appendFileSync(complianceAuditPath(), `${JSON.stringify(entry)}\n`);
   } catch {
     return;
   }
@@ -200,6 +411,103 @@ export function complianceAuditMiddleware(req: Request, res: Response, next: Nex
   next();
 }
 
+export interface RetentionPolicyResult {
+  dataType: string;
+  enforcement: 'automatic' | 'external';
+  action: string;
+  retentionDays: number;
+  cutoffIso: string;
+  processed?: number;
+  archivedTo?: string;
+  skipped?: boolean;
+  reason?: string;
+}
+
+export async function enforceRetention(now: Date = new Date()): Promise<{ ranAt: string; policies: RetentionPolicyResult[] }> {
+  const results: RetentionPolicyResult[] = [];
+  for (const policy of retentionPolicies) {
+    const cutoff = now.getTime() - policy.retentionDays * 24 * 60 * 60 * 1000;
+    const base = {
+      dataType: policy.dataType,
+      enforcement: policy.enforcement,
+      action: policy.action,
+      retentionDays: policy.retentionDays,
+      cutoffIso: new Date(cutoff).toISOString(),
+    };
+    if (policy.enforcement === 'external') {
+      results.push({
+        ...base,
+        skipped: true,
+        reason: 'documented policy enforced by the owning service outside this API; not executed here',
+      });
+      continue;
+    }
+    if (policy.dataType === 'audit_logs') {
+      results.push({ ...base, ...archiveAgedComplianceAudit(cutoff) });
+    } else if (policy.dataType === 'debug_logs') {
+      results.push({ ...base, ...deleteAgedDebugLogs(cutoff) });
+    } else {
+      results.push({ ...base, skipped: true, reason: 'no local enforcement path defined' });
+    }
+  }
+  return { ranAt: now.toISOString(), policies: results };
+}
+
+function archiveAgedComplianceAudit(cutoff: number): { processed: number; archivedTo?: string } {
+  const file = complianceAuditPath();
+  if (!fs.existsSync(file)) return { processed: 0 };
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter((line) => line.trim());
+  const keep: string[] = [];
+  const aged: string[] = [];
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line) as { timestampNs?: string };
+      const timestampMs = typeof entry.timestampNs === 'string' ? Number(BigInt(entry.timestampNs) / 1_000_000n) : NaN;
+      if (!Number.isNaN(timestampMs) && timestampMs < cutoff) {
+        aged.push(line);
+      } else {
+        keep.push(line);
+      }
+    } catch {
+      keep.push(line);
+    }
+  }
+  if (aged.length > 0) {
+    const archive = complianceAuditArchivePath();
+    fs.mkdirSync(path.dirname(archive), { recursive: true });
+    fs.appendFileSync(archive, `${aged.join('\n')}\n`);
+    fs.writeFileSync(file, keep.length > 0 ? `${keep.join('\n')}\n` : '');
+    return { processed: aged.length, archivedTo: archive };
+  }
+  return { processed: 0 };
+}
+
+function deleteAgedDebugLogs(cutoff: number): { processed: number } {
+  const dir = complianceLogDir();
+  if (!fs.existsSync(dir)) return { processed: 0 };
+  let processed = 0;
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith('.log')) continue;
+    if (name === 'audit.log' || name.startsWith('compliance-audit')) continue;
+    const full = path.join(dir, name);
+    try {
+      const stat = fs.statSync(full);
+      if (stat.mtimeMs < cutoff) {
+        fs.unlinkSync(full);
+        processed += 1;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return { processed };
+}
+
+const retentionTimer = setInterval(() => {
+  enforceRetention().catch((err) => logger.warn('Scheduled retention enforcement failed', err));
+}, 24 * 60 * 60 * 1000);
+retentionTimer.unref?.();
+
 const cadenceMapReg: Record<RecurringReport['cadence'], number> = {
   daily: 24 * 60 * 60 * 1000,
   weekly: 7 * 24 * 60 * 60 * 1000,
@@ -222,19 +530,25 @@ function generateReportContent(framework: string): Record<string, unknown> {
     results: { success, failure, denied },
   };
   switch (framework) {
-    case 'soc2':
+    case 'soc2': {
+      const controls = evaluateSoc2Controls();
       return {
         ...base,
-        controls: soc2Controls,
-        openFindings: soc2Controls.filter(c => c.status !== 'implemented').length,
+        controls,
+        controlsByVerification: controlsByVerification(controls),
+        automatedImplemented: controls.filter(c => c.verification === 'automated' && c.status === 'implemented').length,
+        automatedWithRecordedResult: controls.filter(c => c.verification === 'automated' && c.lastCheckedAt).length,
+        openFindings: controls.filter(c => c.status !== 'implemented').length,
         incidentCount: auditEntries.filter(e => e.eventType === 'error.http').length,
       };
+    }
     case 'gdpr':
       return {
         ...base,
         dataDeletionProofs: auditEntries.filter(e => e.eventType === 'data.deletion').length,
         dataExportProofs: auditEntries.filter(e => e.eventType === 'data.export').length,
         retentionPolicies,
+        dataSubjectRequests: dsarById.size,
       };
     case 'mica':
       return {
@@ -271,39 +585,92 @@ function runScheduledReports(): void {
 const reportTimer = setInterval(runScheduledReports, 60 * 60 * 1000);
 reportTimer.unref?.();
 
-router.post('/data/subject/:id/requests', (req: Request, res: Response) => {
+router.post('/data/subject/:id/requests', authMiddleware, requireRole('operator'), async (req: Request, res: Response) => {
   const subjectId = req.params.id;
-  const requestType = (req.body?.requestType || 'access') as DataSubjectRequest['requestType'];
-  const request = createDataSubjectRequest(subjectId, requestType, req);
-  recordComplianceAudit('data.subject_request', req, 'request_subject_data', 'success', { subjectId, requestId: request.id, requestType });
-  res.status(202).json({ success: true, data: { request } });
+  const requestType = (req.body?.requestType || 'access') as DsarRequestType;
+  if (!['access', 'erasure', 'explanation'].includes(requestType)) {
+    res.status(400).json({ success: false, error: 'requestType must be one of: access, erasure, explanation' });
+    return;
+  }
+  try {
+    const request = await createDataSubjectRequest(subjectId, requestType, req);
+    recordComplianceAudit('data.subject_request', req, 'request_subject_data', 'success', { subjectId, requestId: request.id, requestType });
+    res.status(202).json({ success: true, data: { request } });
+  } catch (err) {
+    logger.error('Failed to persist data-subject request', err);
+    res.status(500).json({ success: false, error: 'failed to persist data subject request' });
+  }
 });
 
-router.get('/data/subject/:id/requests', (req: Request, res: Response) => {
+router.get('/data/subject/:id/requests', authMiddleware, requireRole('viewer'), async (req: Request, res: Response) => {
+  await ensureDsarHydrated();
   const requests = getDataSubjectRequests(req.params.id);
+  recordComplianceAudit('data.subject_access', req, 'view_subject_requests', 'success', { subjectId: req.params.id, count: requests.length });
   res.json({ success: true, data: { requests, count: requests.length } });
 });
 
-router.post('/data/subject/:id/requests/:requestId/fulfill', (req: Request, res: Response) => {
-  const requests = getDataSubjectRequests(req.params.id);
-  const request = requests.find((candidate) => candidate.id === req.params.requestId);
+router.patch('/data/subject/:id/requests/:requestId', authMiddleware, requireRole('operator'), async (req: Request, res: Response) => {
+  await ensureDsarHydrated();
+  const request = findDsar(req.params.id, req.params.requestId);
+  if (!request) {
+    res.status(404).json({ success: false, error: 'request not found' });
+    return;
+  }
+
+  const to = req.body?.status as DsarStatus;
+  if (!to || !(to in dsarTransitions)) {
+    res.status(400).json({ success: false, error: 'status must be one of: processing, fulfilled, rejected' });
+    return;
+  }
+  const allowed = dsarTransitions[request.status];
+  if (!allowed.includes(to)) {
+    res.status(409).json({ success: false, error: `invalid transition ${request.status} -> ${to}` });
+    return;
+  }
+
+  const from = request.status;
+  const actor = actorOf(req);
+  const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+  try {
+    await persistDsars(() => applyTransition(request, to, actor, note));
+  } catch (err) {
+    logger.error('Failed to persist data-subject request transition', err);
+    res.status(500).json({ success: false, error: 'failed to persist state transition' });
+    return;
+  }
+
+  recordComplianceAudit('data.subject_request.transition', req, 'transition_subject_data_request', 'success', { subjectId: request.subjectId, requestId: request.id, from, to });
+  res.json({ success: true, data: { request } });
+});
+
+router.post('/data/subject/:id/requests/:requestId/fulfill', authMiddleware, requireRole('operator'), async (req: Request, res: Response) => {
+  await ensureDsarHydrated();
+  const request = findDsar(req.params.id, req.params.requestId);
   if (!request) return res.status(404).json({ success: false, error: 'request not found' });
+  if (!['received', 'processing'].includes(request.status)) {
+    return res.status(409).json({ success: false, error: `invalid transition ${request.status} -> fulfilled` });
+  }
 
   const fulfilledAt = new Date().toISOString();
   const result = {
-    retention: retentionPolicies.map((policy) => ({ store: policy.store, action: policy.action, retentionDays: policy.retentionDays })),
+    retention: retentionPolicies.map((policy) => ({ store: policy.store, action: policy.action, retentionDays: policy.retentionDays, enforcement: policy.enforcement })),
     erasureProof: crypto.createHash('sha256').update(`${request.subjectId}:${fulfilledAt}:${request.requestType}`).digest('hex'),
   };
-  request.status = 'fulfilled';
-  request.fulfilledAt = fulfilledAt;
-  request.result = result;
-  request.notes = [...(request.notes || []), `Fulfilled via ${req.method} ${req.originalUrl || req.path}`];
+  try {
+    await persistDsars(() => {
+      applyTransition(request, 'fulfilled', actorOf(req), `Fulfilled via ${req.method} ${req.originalUrl || req.path}`);
+      request.result = result;
+    });
+  } catch (err) {
+    logger.error('Failed to persist data-subject request fulfilment', err);
+    return res.status(500).json({ success: false, error: 'failed to persist fulfilment' });
+  }
 
   recordComplianceAudit('data.subject_request.fulfilled', req, 'fulfill_subject_data_request', 'success', { subjectId: request.subjectId, requestId: request.id, ...result });
   res.json({ success: true, data: { request } });
 });
 
-router.get('/audit', (req: Request, res: Response) => {
+router.get('/audit', authMiddleware, requireRole('viewer'), (req: Request, res: Response) => {
   const { eventType, actor, from, to } = req.query;
   const page = Math.max(parseInt(req.query.page?.toString() || '1', 10), 1);
   const limit = 100;
@@ -317,40 +684,56 @@ router.get('/audit', (req: Request, res: Response) => {
     return true;
   });
   const start = (page - 1) * limit;
+  const entries = filtered.slice(start, start + limit);
+  recordComplianceAudit('data.audit_access', req, 'view_compliance_audit', 'success', { returned: entries.length, total: filtered.length });
   res.json({
     success: true,
     data: {
-      entries: filtered.slice(start, start + limit),
+      entries,
       pagination: { page, limit, total: filtered.length },
     },
   });
 });
 
-router.delete('/data/subject/:id', (req: Request, res: Response) => {
+router.delete('/data/subject/:id', authMiddleware, requireRole('operator'), async (req: Request, res: Response) => {
   const subjectId = req.params.id;
-  const request = createDataSubjectRequest(subjectId, 'erasure', req);
-  const deletedRangeHash = crypto.createHash('sha256').update(subjectId).digest('hex');
-  const certificate = {
-    subjectId,
-    deletedAt: new Date().toISOString(),
-    deletedRangeHash,
-    requestId: request.id,
-    stores: retentionPolicies.map((policy) => policy.store),
-    notarization: crypto
-      .createHash('sha256')
-      .update(`${subjectId}:${deletedRangeHash}:${previousHash}`)
-      .digest('hex'),
-  };
-  request.status = 'fulfilled';
-  request.fulfilledAt = certificate.deletedAt;
-  request.result = { deletedRangeHash, stores: certificate.stores };
-  recordComplianceAudit('data.deletion', req, 'delete_subject_data', 'success', certificate);
-  res.json({ success: true, data: certificate });
+  let request: DsarRecord;
+  try {
+    request = await createDataSubjectRequest(subjectId, 'erasure', req);
+    const deletedRangeHash = crypto.createHash('sha256').update(subjectId).digest('hex');
+    const certificate = {
+      subjectId,
+      deletedAt: new Date().toISOString(),
+      deletedRangeHash,
+      requestId: request.id,
+      stores: retentionPolicies.map((policy) => policy.store),
+      notarization: crypto
+        .createHash('sha256')
+        .update(`${subjectId}:${deletedRangeHash}:${previousHash}`)
+        .digest('hex'),
+    };
+    await persistDsars(() => {
+      applyTransition(request, 'fulfilled', actorOf(req), 'Erasure fulfilled');
+      request.result = { deletedRangeHash, stores: certificate.stores };
+    });
+    recordComplianceAudit('data.deletion', req, 'delete_subject_data', 'success', certificate);
+    res.json({ success: true, data: certificate });
+  } catch (err) {
+    logger.error('Failed to persist erasure request', err);
+    res.status(500).json({ success: false, error: 'failed to persist erasure request' });
+  }
 });
 
-router.get('/data/subject/:id/export', (req: Request, res: Response) => {
+router.get('/data/subject/:id/export', authMiddleware, requireRole('operator'), async (req: Request, res: Response) => {
   const subjectId = req.params.id;
-  const request = createDataSubjectRequest(subjectId, 'access', req);
+  let request: DsarRecord;
+  try {
+    request = await createDataSubjectRequest(subjectId, 'access', req);
+  } catch (err) {
+    logger.error('Failed to persist export request', err);
+    res.status(500).json({ success: false, error: 'failed to persist export request' });
+    return;
+  }
   const lineageRecords = listLineage().slice(-5);
   recordComplianceAudit('data.export', req, 'export_subject_data', 'success', { subjectId, requestId: request.id, lineageCount: lineageRecords.length });
   res.json({
@@ -384,7 +767,12 @@ router.get('/compliance/incident-disclosure-policy', (_req: Request, res: Respon
 router.get('/compliance/reports/:framework', (req: Request, res: Response) => {
   const framework = req.params.framework.toLowerCase();
   const reports: Record<string, unknown> = {
-    soc2: { framework: 'SOC 2', controls: soc2Controls, posture: 'current posture only' },
+    soc2: {
+      framework: 'SOC 2',
+      controls: evaluateSoc2Controls(),
+      controlsByVerification: controlsByVerification(evaluateSoc2Controls()),
+      posture: 'current posture only',
+    },
     gdpr: {
       framework: 'GDPR',
       dataInventory: ['price_data', 'audit_logs', 'api_usage'],
@@ -422,15 +810,18 @@ router.get('/compliance/access-reviews', (_req: Request, res: Response) => {
 });
 
 router.get('/compliance/dashboard', (_req: Request, res: Response) => {
-  const implemented = soc2Controls.filter((control) => control.status === 'implemented').length;
+  const controls = evaluateSoc2Controls();
+  const implemented = controls.filter((control) => control.status === 'implemented').length;
   res.json({
     success: true,
     data: {
       auditLogVolume: auditEntries.length,
       retentionPolicies,
       accessReviewStatus: 'scheduled',
-      soc2ControlCompliancePercent: Math.round((implemented / soc2Controls.length) * 100),
-      openComplianceFindings: soc2Controls.filter((control) => control.status !== 'implemented').length,
+      soc2ControlCompliancePercent: Math.round((implemented / controls.length) * 100),
+      soc2ControlsByVerification: controlsByVerification(controls),
+      soc2AutomatedPassing: controls.filter(c => c.verification === 'automated' && c.status === 'implemented').length,
+      openComplianceFindings: controls.filter((control) => control.status !== 'implemented').length,
       timeSinceLastAudit: auditEntries.length ? '0s' : 'never',
       pendingReports: pendingReports.length,
     },

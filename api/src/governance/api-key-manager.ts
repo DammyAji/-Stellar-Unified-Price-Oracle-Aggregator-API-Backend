@@ -3,15 +3,11 @@ import { logger } from '../observability/logger';
 import type { Role } from './rbac';
 import { decryptSecret } from './crypto';
 import type { ApiKeyEntry } from '@stellar-oracle/vault-client';
+import { TIER_RATE_LIMITS, effectiveTenantLimit, type RateTier } from '../platform/limit-model';
+import { createTenantWindow, type TenantWindow } from '../platform/tenant-window';
 
-export type KeyTier = 'free' | 'pro' | 'enterprise' | 'admin';
-
-export const TIER_RATE_LIMITS: Record<KeyTier, number> = {
-  free: 60,
-  pro: 500,
-  enterprise: 10000,
-  admin: 100000,
-};
+export type KeyTier = RateTier;
+export { TIER_RATE_LIMITS };
 
 export interface ApiKeyMetadata {
   keyHash: string;
@@ -39,12 +35,44 @@ export interface ApiKeyStore {
   [keyHash: string]: ApiKeyMetadata;
 }
 
+/** Durable backing store for API keys (Vault KV at `secret/data/api/keys` in production). */
+export interface KeyStore {
+  load(): Promise<Record<string, ApiKeyEntry> | null>;
+  save(entries: Record<string, ApiKeyEntry>): Promise<void>;
+}
+
+/** Same display prefix present in both the environment seed and the key store, with different key hashes. */
+export interface KeyConflict {
+  keyPrefix: string;
+  envHash: string;
+  storeHash: string;
+}
+
+export interface KeyStoreBootReport {
+  loaded: number;
+  seeded: number;
+  conflicts: KeyConflict[];
+}
+
+export type KeyStoreRefreshResult = 'refreshed' | 'empty' | 'failed';
+
+/** A mutation was rolled back because the key store write failed (or was unavailable). */
+export class KeyStoreWriteError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'KeyStoreWriteError';
+  }
+}
+
+function canonicalKeyJson(entries: Record<string, ApiKeyEntry>): string {
+  return JSON.stringify(Object.keys(entries).sort().map((hash) => [hash, entries[hash]]));
+}
+
 export class ApiKeyManager {
   /** Keyed by SHA-256 hash of the API key — plaintext keys are never retained. */
   private keys: Map<string, ApiKeyMetadata> = new Map();
-  private lastMinuteRequests: Map<string, number[]> = new Map();
 
-  constructor() {
+  constructor(private window: TenantWindow = createTenantWindow()) {
     this.loadKeysFromEnv();
   }
 
@@ -58,7 +86,7 @@ export class ApiKeyManager {
       lastUsed: null,
       requestCount: 0,
       isActive: true,
-      rateLimitPerMin,
+      rateLimitPerMin: effectiveTenantLimit(tier, rateLimitPerMin),
       tier,
       role,
       scopes: scopes && scopes.length > 0 ? [...scopes] : undefined,
@@ -90,36 +118,45 @@ export class ApiKeyManager {
     return !!metadata && metadata.role === 'admin';
   }
 
-  checkRateLimit(key: string): { allowed: boolean; remaining: number; resetTime: number; retryAfter?: number } {
+  /**
+   * The authoritative tenant allowance: one shared fixed window per key hash
+   * (Redis-backed across replicas when configured, per-pod otherwise) using
+   * the effective limit from the limit model. `limit` is the number actually
+   * enforced and the value reported in `X-RateLimit-Limit`.
+   */
+  async checkRateLimit(key: string): Promise<{
+    allowed: boolean;
+    remaining: number;
+    resetTime: number;
+    retryAfter?: number;
+    limit: number;
+    degraded: boolean;
+    mode: 'shared-redis' | 'local-per-pod';
+  }> {
     const keyHash = this.hashKey(key);
     const metadata = this.keys.get(keyHash);
     if (!metadata) {
-      return { allowed: false, remaining: 0, resetTime: 0 };
+      return { allowed: false, remaining: 0, resetTime: 0, limit: 0, degraded: false, mode: 'local-per-pod' };
     }
 
-    const now = Date.now();
-    const windowMs = 60000;
-    const oneMinuteAgo = now - windowMs;
+    const limit = effectiveTenantLimit(metadata.tier, metadata.rateLimitPerMin);
+    const result = await this.window.consume(keyHash, limit);
+    const resetTime = result.reset * 1000;
 
-    let requests = this.lastMinuteRequests.get(keyHash) || [];
-    requests = requests.filter((ts) => ts > oneMinuteAgo);
-
-    if (requests.length >= metadata.rateLimitPerMin) {
-      const oldestRequest = Math.min(...requests);
-      const resetTime = oldestRequest + windowMs;
-      const retryAfter = Math.ceil((resetTime - now) / 1000);
-
-      return { allowed: false, remaining: 0, resetTime, retryAfter };
+    if (result.allowed) {
+      metadata.lastUsed = Date.now();
+      metadata.requestCount++;
     }
 
-    requests.push(now);
-    this.lastMinuteRequests.set(keyHash, requests);
-
-    metadata.lastUsed = now;
-    metadata.requestCount++;
-
-    const remaining = metadata.rateLimitPerMin - requests.length;
-    return { allowed: true, remaining, resetTime: now + windowMs };
+    return {
+      allowed: result.allowed,
+      remaining: result.remaining,
+      resetTime,
+      retryAfter: result.allowed ? undefined : Math.max(1, result.reset - Math.floor(Date.now() / 1000)),
+      limit: result.limit,
+      degraded: !result.shared,
+      mode: result.mode,
+    };
   }
 
   rotateKey(oldKeyHash: string): GeneratedApiKey | null {
@@ -139,7 +176,6 @@ export class ApiKeyManager {
     };
 
     this.keys.delete(oldKeyHash);
-    this.lastMinuteRequests.delete(oldKeyHash);
     this.keys.set(newHash, newMetadata);
     logger.info(`Rotated API key: old=${metadata.keyPrefix}... new=${newMetadata.keyPrefix}...`);
 
@@ -198,8 +234,11 @@ export class ApiKeyManager {
     const metadata = this.keys.get(keyHash);
     if (!metadata) return false;
 
-    metadata.rateLimitPerMin = newLimit;
-    logger.info(`Updated rate limit for ${metadata.keyPrefix}... to ${newLimit}/min`);
+    const effective = effectiveTenantLimit(metadata.tier, newLimit);
+    metadata.rateLimitPerMin = effective;
+    logger.info(
+      `Updated rate limit for ${metadata.keyPrefix}... to ${effective}/min (tier=${metadata.tier}, ceiling applies)`,
+    );
     return true;
   }
 
@@ -217,15 +256,155 @@ export class ApiKeyManager {
     const metadata = this.keys.get(keyHash);
     const result = this.keys.delete(keyHash);
     if (result) {
-      this.lastMinuteRequests.delete(keyHash);
       logger.info(`Deleted API key: ${metadata!.keyPrefix}...`);
     }
     return result;
   }
 
+  setStore(store: KeyStore | null): void {
+    this.store = store;
+  }
+
+  hasStore(): boolean {
+    return this.store !== null;
+  }
+
+  /** Deep copy of the in-memory key map, used to roll back failed transactions. */
+  snapshot(): Record<string, ApiKeyMetadata> {
+    return structuredClone(Object.fromEntries(this.keys));
+  }
+
+  restore(snapshot: Record<string, ApiKeyMetadata>): void {
+    this.keys = new Map(Object.entries(snapshot));
+  }
+
+  /** Write memory to the store. No-op without a store; throws when the store rejects the write. */
+  async syncToStore(): Promise<void> {
+    if (!this.store) return;
+    const entries = this.exportKeysForVault();
+    const serialized = canonicalKeyJson(entries);
+    if (serialized === this.lastSyncedJson) return;
+    await this.store.save(entries);
+    this.lastSyncedJson = serialized;
+  }
+
+  /**
+   * Boot sequence: load the store, report environment-seed conflicts, merge,
+   * drop runtime-only keys once the store is authoritative, and seed anything
+   * the store is missing. Throws when the store cannot be read.
+   */
+  async hydrate(): Promise<KeyStoreBootReport> {
+    if (!this.store) return { loaded: 0, seeded: 0, conflicts: [] };
+    const storeKeys = (await this.store.load()) ?? {};
+    const loaded = Object.keys(storeKeys).length;
+    let conflicts: KeyConflict[] = [];
+    if (loaded > 0) {
+      conflicts = this.compareWithStore(storeKeys);
+      for (const conflict of conflicts) {
+        logger.warn(
+          `API key store conflict for prefix ${conflict.keyPrefix}: environment seed ${conflict.envHash.substring(0, 12)} vs store ${conflict.storeHash.substring(0, 12)} — both retained, not silently preferring one`,
+        );
+      }
+      this.loadKeysFromVault(storeKeys);
+      for (const hash of [...this.keys.keys()]) {
+        if (!storeKeys[hash] && !this.envKeyHashes.has(hash)) {
+          const orphan = this.keys.get(hash)!;
+          this.keys.delete(hash);
+          logger.warn(
+            `Dropped runtime-generated API key ${orphan.keyPrefix}... — it is not in the key store; seed keys via API_KEYS or create them through the admin API so they persist`,
+          );
+        }
+      }
+    }
+    const missing =
+      loaded > 0
+        ? [...this.envKeyHashes].filter((hash) => !storeKeys[hash])
+        : [...this.keys.keys()];
+    if (missing.length > 0) {
+      await this.syncToStore();
+      logger.info(`Seeded ${missing.length} API key(s) into the key store`);
+    }
+    return { loaded, seeded: missing.length, conflicts };
+  }
+
+  /** Compare environment-seeded keys against the store: same prefix with a different hash is a conflict. */
+  compareWithStore(storeKeys: Record<string, ApiKeyEntry>): KeyConflict[] {
+    const conflicts: KeyConflict[] = [];
+    for (const [hash, entry] of Object.entries(storeKeys)) {
+      if (!entry || typeof entry.keyHash !== 'string' || this.envKeyHashes.has(hash)) continue;
+      const envPeer = Array.from(this.envKeyHashes)
+        .map((envHash) => this.keys.get(envHash))
+        .find((meta) => meta !== undefined && meta.keyPrefix === entry.keyPrefix);
+      if (envPeer && envPeer.keyHash !== entry.keyHash) {
+        conflicts.push({ keyPrefix: entry.keyPrefix, envHash: envPeer.keyHash, storeHash: entry.keyHash });
+      }
+    }
+    return conflicts;
+  }
+
+  /**
+   * Replace in-memory state with the store's contents (replica refresh).
+   * Never wipes memory on an empty store; in-flight usage counters survive.
+   */
+  async refreshFromStore(): Promise<KeyStoreRefreshResult> {
+    if (!this.store) return 'empty';
+    let storeKeys: Record<string, ApiKeyEntry> | null;
+    try {
+      storeKeys = await this.store.load();
+    } catch (err) {
+      logger.warn('API key store refresh failed; keeping in-memory keys', err);
+      return 'failed';
+    }
+    if (!storeKeys || Object.keys(storeKeys).length === 0) return 'empty';
+    const previous = this.keys;
+    const next = new Map<string, ApiKeyMetadata>();
+    for (const entry of Object.values(storeKeys)) {
+      if (!entry || typeof entry.keyHash !== 'string' || entry.keyHash.length === 0) continue;
+      const metadata = this.metadataFromEntry(entry);
+      const prior = previous.get(entry.keyHash);
+      if (prior) {
+        metadata.lastUsed = prior.lastUsed;
+        metadata.requestCount = prior.requestCount;
+      }
+      next.set(entry.keyHash, metadata);
+    }
+    if (next.size === 0) return 'empty';
+    this.keys = next;
+    this.lastSyncedJson = canonicalKeyJson(this.exportKeysForVault());
+    return 'refreshed';
+  }
+
+  /**
+   * Run a mutation against the authoritative store: refresh first, mutate,
+   * then persist before returning. A failed refresh aborts the mutation; a
+   * failed write rolls the mutation back and throws KeyStoreWriteError.
+   */
+  async transact<T>(mutate: () => T): Promise<T> {
+    if (this.store) {
+      const refreshed = await this.refreshFromStore();
+      if (refreshed === 'failed') {
+        throw new KeyStoreWriteError('API key store unavailable; mutation was not applied');
+      }
+    }
+    const before = this.snapshot();
+    const result = mutate();
+    try {
+      await this.syncToStore();
+    } catch (err) {
+      this.restore(before);
+      throw new KeyStoreWriteError(
+        `API key store write failed; mutation rolled back: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+    return result;
+  }
+
   /** Export all keys in Vault-compatible format for persistence.
-   *  Note: plaintext keys are never stored after generation;
-   *  keyPrefix is used for display/identification purposes. */
+   *  Contract: only the SHA-256 hash of the key material and its metadata are
+   *  stored — the plaintext key is never written (`key` is blank). On restore,
+   *  validation works by hashing the presented key and matching it against
+   *  `keyHash`; the plaintext itself cannot be reconstructed from the store. */
   exportKeysForVault(): Record<string, ApiKeyEntry> {
     const result: Record<string, ApiKeyEntry> = {};
     for (const [hash, meta] of this.keys) {
@@ -245,25 +424,38 @@ export class ApiKeyManager {
     return result;
   }
 
-  /** Load keys from Vault into the in-memory store. */
-  loadKeysFromVault(vaultKeys: Record<string, ApiKeyEntry>): void {
-    for (const [, entry] of Object.entries(vaultKeys)) {
-      const metadata: ApiKeyMetadata = {
-        keyHash: entry.keyHash,
-        keyPrefix: entry.keyPrefix || entry.key.substring(0, 12),
-        createdAt: entry.createdAt,
-        lastUsed: null,
-        requestCount: 0,
-        isActive: entry.isActive,
-        rateLimitPerMin: entry.rateLimitPerMin,
-        tier: entry.tier as KeyTier,
-        role: entry.role as Role,
-        scopes: Array.isArray(entry.scopes) ? [...entry.scopes] : undefined,
-        description: entry.description,
-      };
-      this.keys.set(entry.keyHash, metadata);
+  /** Load keys from Vault into the in-memory store. Returns how many entries were accepted. */
+  loadKeysFromVault(vaultKeys: Record<string, ApiKeyEntry>): number {
+    let loaded = 0;
+    for (const entry of Object.values(vaultKeys)) {
+      if (!entry || typeof entry.keyHash !== 'string' || entry.keyHash.length === 0) {
+        logger.warn('Skipping malformed API key entry in store (missing keyHash)');
+        continue;
+      }
+      this.keys.set(entry.keyHash, this.metadataFromEntry(entry));
+      loaded += 1;
     }
-    logger.info(`Loaded ${Object.keys(vaultKeys).length} API keys from Vault`);
+    logger.info(`Loaded ${loaded} API keys from Vault`);
+    return loaded;
+  }
+
+  private metadataFromEntry(entry: ApiKeyEntry): ApiKeyMetadata {
+    const keyPrefix =
+      entry.keyPrefix ||
+      (entry.key && entry.key.length >= 12 ? entry.key.substring(0, 12) : entry.keyHash.substring(0, 12));
+    return {
+      keyHash: entry.keyHash,
+      keyPrefix,
+      createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
+      lastUsed: null,
+      requestCount: 0,
+      isActive: entry.isActive !== false,
+      rateLimitPerMin: typeof entry.rateLimitPerMin === 'number' ? entry.rateLimitPerMin : TIER_RATE_LIMITS.free,
+      tier: (entry.tier as KeyTier) || 'free',
+      role: (entry.role as Role) || 'viewer',
+      scopes: Array.isArray(entry.scopes) ? [...entry.scopes] : undefined,
+      description: entry.description,
+    };
   }
 
   hashKey(key: string): string {
@@ -305,13 +497,14 @@ export class ApiKeyManager {
             lastUsed: null,
             requestCount: 0,
             isActive: true,
-            rateLimitPerMin: isNaN(limit) ? TIER_RATE_LIMITS[tier] : limit,
+            rateLimitPerMin: effectiveTenantLimit(tier, isNaN(limit) ? undefined : limit),
             tier,
             role,
             description,
           };
 
           this.keys.set(keyHash, metadata);
+          this.envKeyHashes.add(keyHash);
         }
       }
 
