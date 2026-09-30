@@ -210,8 +210,27 @@ async function poll(): Promise<AggregatedPrice[]> {
     logger.warn('Cross-region price drift exceeds threshold', drift);
   }
   const quarantine = regionQuarantine.evaluate(drift);
-  if (quarantine.quarantined) {
-    logger.error(`Region ${config.region.id} quarantined due to cross-region price drift`, quarantine);
+  if (quarantine.transition) {
+    logger[quarantine.quarantined ? 'error' : 'info'](`Region ${config.region.id} ${quarantine.transition}`, {
+      quarantine,
+      drift,
+    });
+    await alertManager.reportRegionQuarantine({
+      region: config.region.id,
+      transition: quarantine.transition,
+      maxDriftPercent: drift.maxDriftPercent,
+      thresholdPercent: config.region.driftAlertPercent,
+      recoverPercent: config.region.quarantineRecoverPercent,
+      driftKnown: drift.driftKnown,
+      regionCount: drift.regionCount,
+      peerCount: drift.peerCount,
+    });
+  }
+  if (publisher) {
+    publisher.setPublishingEnabled(
+      !quarantine.quarantined,
+      quarantine.quarantined ? quarantine.reason ?? 'cross-region drift' : 'quarantine cleared',
+    );
   }
 
   const unhealthy = sources.filter((s) => !s.health.healthy);

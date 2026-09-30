@@ -330,6 +330,20 @@ export const regionPeersConfigured = new client.Gauge({
   registers: [register],
 });
 
+export const regionQuarantineState = new client.Gauge({
+  name: 'region_quarantine_state',
+  help: 'Whether this region is quarantined (1) or publishing normally (0)',
+  labelNames: ['region'],
+  registers: [register],
+});
+
+export const regionQuarantineTransitionsTotal = new client.Counter({
+  name: 'region_quarantine_transitions_total',
+  help: 'Number of times this region entered or left quarantine',
+  labelNames: ['region', 'to'],
+  registers: [register],
+});
+
 export const replicationBusUp = new client.Gauge({
   name: 'replication_bus_up',
   help: '1 while the cross-region replication bus producer and consumer are connected',

@@ -38,6 +38,7 @@ export class SubmissionRetryQueue {
   private maxBackoffMs: number;
   private baseBackoffMs: number;
   private retryInterval: NodeJS.Timeout | null = null;
+  private suspended = false;
 
   constructor(options: {
     maxRetries?: number;
@@ -51,7 +52,7 @@ export class SubmissionRetryQueue {
   }
 
   start(): void {
-    if (this.retryInterval) return;
+    if (this.suspended || this.retryInterval) return;
     const checkIntervalMs = 5000;
     this.retryInterval = setInterval(() => {
       this.processQueue().catch((err) => {
@@ -70,7 +71,34 @@ export class SubmissionRetryQueue {
     logger.info('[RetryQueue] Retry queue processor stopped');
   }
 
+  /**
+   * Suspend or resume the queue (Issue #580). Suspending stops the processor
+   * and discards everything already queued as orphaned, so a region that has
+   * been declared untrustworthy cannot flush stale submissions later when it
+   * recovers or when the process shuts down. While suspended, enqueue() drops
+   * new submissions instead of accumulating them.
+   */
+  setSuspended(suspended: boolean, reason = 'quarantine'): void {
+    if (this.suspended === suspended) return;
+    this.suspended = suspended;
+    if (suspended) {
+      this.stop();
+      this.clear(true, reason);
+    } else {
+      this.start();
+      logger.info('[RetryQueue] Retry queue resumed');
+    }
+  }
+
+  isSuspended(): boolean {
+    return this.suspended;
+  }
+
   enqueue(submission: Omit<RetryableSubmission, 'attemptCount' | 'nextRetryAt'>): string {
+    if (this.suspended) {
+      logger.debug(`[RetryQueue] Dropping submission for ${submission.asset}: queue is suspended`);
+      return '';
+    }
     const key = `${submission.asset}:${submission.timestamp}`;
     const retry: RetryableSubmission = {
       ...submission,
@@ -89,6 +117,7 @@ export class SubmissionRetryQueue {
   }
 
   async processQueue(): Promise<void> {
+    if (this.suspended) return;
     const now = Date.now();
     const readyItems: [string, RetryableSubmission][] = [];
 
@@ -175,12 +204,12 @@ export class SubmissionRetryQueue {
     return deleted;
   }
 
-  /** Drain or clear queue on shutdown, recording any orphaned items */
-  clear(markOrphaned = false): number {
+  /** Drain or clear queue on shutdown or suspension, recording any orphaned items */
+  clear(markOrphaned = false, reason = 'shutdown'): number {
     const size = this.queue.size;
     if (size > 0 && markOrphaned) {
       retryQueueOrphanedRetriesTotal.inc(size);
-      logger.warn(`[RetryQueue] ${size} retry items orphaned on shutdown`);
+      logger.warn(`[RetryQueue] ${size} retry items orphaned (${reason})`);
     }
     this.queue.clear();
     retryQueueDepth.set(0);

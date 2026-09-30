@@ -15,7 +15,7 @@ export interface AlertThresholds {
 export interface AlertEvent {
   timestamp: number;
   asset: string;
-  type: 'deviation' | 'stale' | 'source_down' | 'sla_breach';
+  type: 'deviation' | 'stale' | 'source_down' | 'sla_breach' | 'region_quarantine';
   message: string;
   previousPrice?: string;
   currentPrice?: string;
@@ -24,6 +24,11 @@ export interface AlertEvent {
   source?: string;
   elapsedSeconds?: number;
   thresholdSeconds?: number;
+  region?: string;
+  transition?: 'quarantined' | 'recovered';
+  regionCount?: number;
+  peerCount?: number;
+  driftKnown?: boolean;
 }
 
 export interface AlertConfig {
@@ -252,6 +257,38 @@ class AlertManager {
     }
   }
 
+  /**
+   * Fires on every quarantine transition with the drift evidence attached, so
+   * an operator sees why a region stopped writing to the contract and when it
+   * is allowed to write again (Issue #580).
+   */
+  async reportRegionQuarantine(event: {
+    region: string;
+    transition: 'quarantined' | 'recovered';
+    maxDriftPercent: number;
+    thresholdPercent: number;
+    recoverPercent: number;
+    driftKnown: boolean;
+    regionCount: number;
+    peerCount: number;
+  }): Promise<void> {
+    const entering = event.transition === 'quarantined';
+    await this.emitAlert({
+      timestamp: Math.floor(Date.now() / 1000),
+      asset: event.region,
+      type: 'region_quarantine',
+      region: event.region,
+      transition: event.transition,
+      regionCount: event.regionCount,
+      peerCount: event.peerCount,
+      driftKnown: event.driftKnown,
+      deviationPercent: event.maxDriftPercent,
+      message: entering
+        ? `Region ${event.region} quarantined: cross-region drift ${event.maxDriftPercent.toFixed(4)}% exceeds ${event.thresholdPercent}%. Contract publication suspended for this region; cached reads keep serving. driftKnown=${event.driftKnown} regions=${event.regionCount} peers=${event.peerCount}`
+        : `Region ${event.region} recovered from quarantine: drift ${event.maxDriftPercent.toFixed(4)}% is within ${event.recoverPercent}% with driftKnown=${event.driftKnown} regions=${event.regionCount} peers=${event.peerCount}. Contract publication resumed.`,
+    });
+  }
+
   private async emitAlert(alert: AlertEvent): Promise<boolean> {
     const dedupKey = this.getAlertKey(alert);
     const now = Math.floor(Date.now() / 1000);
@@ -322,7 +359,8 @@ class AlertManager {
 
   private getAlertKey(alert: AlertEvent): string {
     const target = alert.source ?? alert.affectedSources?.join(',') ?? 'global';
-    return `${alert.asset.toUpperCase()}:${alert.type}:${target}`;
+    const base = `${alert.asset.toUpperCase()}:${alert.type}:${target}`;
+    return alert.transition ? `${base}:${alert.transition}` : base;
   }
 
   private isFlapping(alertKey: string, now: number): boolean {
@@ -369,12 +407,12 @@ class AlertManager {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           routing_key: this.config.pagerDutyRoutingKey,
-          event_action: 'trigger',
+          event_action: alert.type === 'region_quarantine' && alert.transition === 'recovered' ? 'resolve' : 'trigger',
           dedup_key: `${alert.asset}:${alert.type}`,
           payload: {
             summary: alert.message,
             source: 'price-oracle-aggregator',
-            severity: (alert.type === 'source_down' || alert.type === 'sla_breach') ? 'critical' : 'warning',
+            severity: (alert.type === 'source_down' || alert.type === 'sla_breach' || alert.type === 'region_quarantine') ? 'critical' : 'warning',
             custom_details: alert,
           },
         }),
@@ -389,7 +427,7 @@ class AlertManager {
 
   private async sendOpsgenie(alert: AlertEvent): Promise<void> {
     try {
-      const priority = alert.type === 'source_down' || alert.type === 'sla_breach' ? 'P1' : 'P3';
+      const priority = alert.type === 'source_down' || alert.type === 'sla_breach' || alert.type === 'region_quarantine' ? 'P1' : 'P3';
       const response = await fetch('https://api.opsgenie.com/v2/alerts', {
         method: 'POST',
         headers: {
