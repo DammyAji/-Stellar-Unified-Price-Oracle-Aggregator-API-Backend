@@ -2,6 +2,7 @@ import { httpClient } from '../infrastructure/http-client';
 import { config } from '../infrastructure/config';
 import { NormalizedPrice, OracleSourceName } from '../infrastructure/types';
 import { BaseSource } from './base';
+import { resolveDecimals } from './decimals';
 
 interface ReflectorPriceData {
   price: string | number;
@@ -35,7 +36,7 @@ export class ReflectorSource extends BaseSource {
     return this.normalize(
       asset,
       data.price,
-      data.decimals || 8,
+      resolveDecimals(this.name, data.decimals),
       data.timestamp ?? null,
     );
   }
