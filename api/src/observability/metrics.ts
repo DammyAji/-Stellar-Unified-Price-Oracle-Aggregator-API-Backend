@@ -194,6 +194,58 @@ export const wsSubscribeEventsTotal = new client.Counter({
 });
 register.registerMetric(wsSubscribeEventsTotal);
 
+// ── WebSocket replay bounding (issue #606) ───────────────────────────────────
+
+export const wsReplayTotal = new client.Counter({
+  name: 'ws_api_replay_requests_total',
+  help: 'Total replay requests by outcome: complete, truncated or rate_limited',
+  labelNames: ['result'],
+});
+register.registerMetric(wsReplayTotal);
+
+export const wsBufferedAssets = new client.Gauge({
+  name: 'ws_api_buffered_assets',
+  help: 'Number of assets currently holding a replay buffer',
+});
+register.registerMetric(wsBufferedAssets);
+
+export const wsBufferBytes = new client.Gauge({
+  name: 'ws_api_buffer_bytes',
+  help: 'Approximate bytes retained across all replay buffers',
+});
+register.registerMetric(wsBufferBytes);
+
+// ── GraphQL preview surface (issue #607) ─────────────────────────────────────
+
+export const graphqlRequestsTotal = new client.Counter({
+  name: 'graphql_requests_total',
+  help: 'Total GraphQL requests by outcome: success, error, rejected, timeout, disabled, tier_forbidden',
+  labelNames: ['result'],
+});
+register.registerMetric(graphqlRequestsTotal);
+
+// ── Audit chain integrity (issue #598) ───────────────────────────────────────
+
+export const auditEventsTotal = new client.Counter({
+  name: 'audit_events_total',
+  help: 'Total audit events by outcome: appended or refused',
+  labelNames: ['result'],
+});
+register.registerMetric(auditEventsTotal);
+
+export const auditChainValid = new client.Gauge({
+  name: 'audit_chain_valid',
+  help: '1 when the audit log chain is verifiable, 0 after a break or fork',
+});
+register.registerMetric(auditChainValid);
+
+export const auditChainVerificationTotal = new client.Counter({
+  name: 'audit_chain_verifications_total',
+  help: 'Total audit chain verifications by result: passed, failed, forked or error',
+  labelNames: ['result'],
+});
+register.registerMetric(auditChainVerificationTotal);
+
 export const apiCallsByEndpoint = new client.Counter({
   name: 'api_calls_by_endpoint_total',
   help: 'Total API calls grouped by endpoint, method, and status',
@@ -221,6 +273,13 @@ export const rateLimitRedisLatency = new client.Histogram({
 });
 register.registerMetric(rateLimitRedisLatency);
 
+export const rbacDeniedTotal = new client.Counter({
+  name: 'rbac_denied_total',
+  help: 'Authorization denials on admin/governance routes by role, route, and reason',
+  labelNames: ['role', 'route', 'reason'],
+});
+register.registerMetric(rbacDeniedTotal);
+
 export const pipelineStageLatencyMs = new client.Histogram({
   name: 'pipeline_stage_latency_ms',
   help: 'Latency budget for each stage of the price pipeline in milliseconds',
@@ -228,6 +287,48 @@ export const pipelineStageLatencyMs = new client.Histogram({
   buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
 });
 register.registerMetric(pipelineStageLatencyMs);
+
+export const historyFileReadFailuresTotal = new client.Counter({
+  name: 'api_history_file_read_failures_total',
+  help: 'Total history file read failures by reason (unreadable, undecryptable, malformed)',
+  labelNames: ['asset', 'reason'],
+});
+register.registerMetric(historyFileReadFailuresTotal);
+
+export const auditAppendsTotal = new client.Counter({
+  name: 'audit_log_appends_total',
+  help: 'Total audit log append attempts by outcome',
+  labelNames: ['status'],
+});
+register.registerMetric(auditAppendsTotal);
+
+export const auditAppendDuration = new client.Histogram({
+  name: 'audit_log_append_duration_seconds',
+  help: 'Wall-clock cost of appending a single audit entry (issue #599 measured this before and after)',
+  labelNames: ['status'],
+  buckets: [0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1],
+});
+register.registerMetric(auditAppendDuration);
+
+export const auditRetentionRunsTotal = new client.Counter({
+  name: 'audit_retention_runs_total',
+  help: 'Total audit retention sweeps by outcome (completed, skipped, failed)',
+  labelNames: ['status'],
+});
+register.registerMetric(auditRetentionRunsTotal);
+
+export const auditRetentionFailuresTotal = new client.Counter({
+  name: 'audit_retention_failures_total',
+  help: 'Total audit retention sweeps that could not run, by failure reason',
+  labelNames: ['reason'],
+});
+register.registerMetric(auditRetentionFailuresTotal);
+
+export const auditEntriesArchivedTotal = new client.Counter({
+  name: 'audit_entries_archived_total',
+  help: 'Total audit entries moved out of the active log into the archive',
+});
+register.registerMetric(auditEntriesArchivedTotal);
 
 export function metricsMiddleware(req: Request, res: Response, next: NextFunction): void {
   const end = httpRequestDuration.startTimer();

@@ -6,7 +6,7 @@ const messageCount = new Counter('ws_messages_received');
 const connectTime = new Trend('ws_connect_time', true);
 const errorRate = new Rate('ws_error_rate');
 
-const WS_URL = __ENV.WS_URL || 'ws://localhost:4000';
+const WS_URL = __ENV.WS_URL || 'ws://localhost:4001';
 
 export const options = {
   scenarios: {

@@ -47,32 +47,12 @@ export const wsErrorsTotal = new client.Counter({
   registers: [register],
 });
 
-// #587 — Push channel backpressure, liveness and subscription visibility
-export const wsClientsDroppedTotal = new client.Counter({
-  name: 'ws_clients_dropped_total',
-  help: 'Total WebSocket clients dropped by the server (backpressure, ping timeout, oversized message)',
+// Issue #586 — upgrade rejections counted by reason so rate-limit bypass
+// attempts, origin failures and auth failures are individually observable.
+export const wsUpgradeRejectionsTotal = new client.Counter({
+  name: 'ws_upgrade_rejections_total',
+  help: 'WebSocket upgrade rejections by reason (rate-limit, origin, csrf, hmac, ...)',
   labelNames: ['service', 'reason'],
-  registers: [register],
-});
-
-export const wsMessagesDroppedTotal = new client.Counter({
-  name: 'ws_messages_dropped_total',
-  help: 'Total WebSocket messages that were not delivered to a client',
-  labelNames: ['service', 'reason'],
-  registers: [register],
-});
-
-export const wsBufferedBytes = new client.Gauge({
-  name: 'ws_buffered_bytes',
-  help: 'Sum of bytes queued in WebSocket client send buffers',
-  labelNames: ['service'],
-  registers: [register],
-});
-
-export const wsSubscriptionsActive = new client.Gauge({
-  name: 'ws_subscriptions_active',
-  help: 'Total asset subscriptions held by connected WebSocket clients',
-  labelNames: ['service'],
   registers: [register],
 });
 
@@ -95,6 +75,24 @@ export const oracleSourceRequestsTotal = new client.Counter({
 export const oracleSourceSlaBreaches = new client.Counter({
   name: 'oracle_source_sla_breaches_total',
   help: 'Number of oracle source requests exceeding SLA threshold',
+  labelNames: ['source'],
+  registers: [register],
+});
+
+// #583 — budget-blocked fetches: a source whose daily budget is exhausted
+// stops being polled, which degrades aggregation quality and must stay visible.
+export const oracleSourceBudgetBlockedTotal = new client.Counter({
+  name: 'oracle_source_budget_blocked_total',
+  help: 'Fetches skipped because the source daily API budget was exhausted, by source',
+  labelNames: ['source'],
+  registers: [register],
+});
+
+// Issue #584 — schema violations are a provider contract change, not an
+// ordinary fetch failure. Sustained rates must page, not degrade quietly.
+export const oracleSourceInvalidPayloadsTotal = new client.Counter({
+  name: 'oracle_source_invalid_payloads_total',
+  help: 'Provider responses that failed schema validation, by source',
   labelNames: ['source'],
   registers: [register],
 });
@@ -301,74 +299,25 @@ export const retryQueueOrphanedRetriesTotal = new client.Counter({
   registers: [register],
 });
 
-// #581 — Cross-region replication and drift detection
-export const regionDriftPercent = new client.Gauge({
-  name: 'region_drift_percent',
-  help: 'Maximum cross-region price drift observed for the current round',
-  labelNames: ['region'],
+// Issue #589 — History file integrity
+export const historyFileReadFailuresTotal = new client.Counter({
+  name: 'history_file_read_failures_total',
+  help: 'Total history file read failures by asset and reason (unreadable, undecryptable, malformed)',
+  labelNames: ['asset', 'reason'],
   registers: [register],
 });
 
-export const regionDriftKnown = new client.Gauge({
-  name: 'region_drift_known',
-  help: '1 when at least two regions reported the same asset, 0 when drift cannot be computed',
-  labelNames: ['region'],
+export const historyFileQuarantinesTotal = new client.Counter({
+  name: 'history_file_quarantines_total',
+  help: 'Total history files moved to data/quarantine after a parse or decrypt failure',
+  labelNames: ['asset', 'reason'],
   registers: [register],
 });
 
-export const regionPeersReporting = new client.Gauge({
-  name: 'region_peers_reporting',
-  help: 'Peer regions that have reported at least one price into the local register',
-  labelNames: ['region'],
-  registers: [register],
-});
-
-export const regionPeersConfigured = new client.Gauge({
-  name: 'region_peers_configured',
-  help: 'Peer regions configured for cross-region replication',
-  labelNames: ['region'],
-  registers: [register],
-});
-
-export const regionQuarantineState = new client.Gauge({
-  name: 'region_quarantine_state',
-  help: 'Whether this region is quarantined (1) or publishing normally (0)',
-  labelNames: ['region'],
-  registers: [register],
-});
-
-export const regionQuarantineTransitionsTotal = new client.Counter({
-  name: 'region_quarantine_transitions_total',
-  help: 'Number of times this region entered or left quarantine',
-  labelNames: ['region', 'to'],
-  registers: [register],
-});
-
-export const replicationBusUp = new client.Gauge({
-  name: 'replication_bus_up',
-  help: '1 while the cross-region replication bus producer and consumer are connected',
-  labelNames: ['region'],
-  registers: [register],
-});
-
-export const replicationRecordsInboundTotal = new client.Counter({
-  name: 'replication_records_inbound_total',
-  help: 'Price records merged from remote regions over the replication bus',
-  labelNames: ['region', 'source_region'],
-  registers: [register],
-});
-
-export const replicationRecordsOutboundTotal = new client.Counter({
-  name: 'replication_records_outbound_total',
-  help: 'Local price records published to the replication bus',
-  labelNames: ['region'],
-  registers: [register],
-});
-
-export const replicationPublishFailuresTotal = new client.Counter({
-  name: 'replication_publish_failures_total',
-  help: 'Failed attempts to publish local prices to the replication bus',
-  labelNames: ['region'],
+export const historyFileWriteFailuresTotal = new client.Counter({
+  name: 'history_file_write_failures_total',
+  help: 'Total history file append failures by asset and reason',
+  labelNames: ['asset', 'reason'],
   registers: [register],
 });
 

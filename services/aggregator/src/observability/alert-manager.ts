@@ -15,7 +15,7 @@ export interface AlertThresholds {
 export interface AlertEvent {
   timestamp: number;
   asset: string;
-  type: 'deviation' | 'stale' | 'source_down' | 'sla_breach' | 'region_quarantine';
+  type: 'deviation' | 'stale' | 'source_down' | 'sla_breach' | 'invalid_payload';
   message: string;
   previousPrice?: string;
   currentPrice?: string;
@@ -61,6 +61,10 @@ export interface AlertConfig {
   flapSuppressionWindowSeconds?: number;
   /** Number of re-triggers permitted in the flap suppression window */
   flapMaxTriggers?: number;
+  /** Issue #584: invalid-payload alerts after this many schema violations in the window */
+  invalidPayloadMaxPerWindow?: number;
+  /** Issue #584: rolling window in seconds for invalid-payload rate alerting */
+  invalidPayloadWindowSeconds?: number;
 }
 
 class AlertManager {
@@ -70,6 +74,7 @@ class AlertManager {
   private config: AlertConfig;
   private alertHistory: AlertEvent[] = [];
   private slaBreachTimestamps: Map<string, number[]> = new Map();
+  private invalidPayloadTimestamps: Map<string, number[]> = new Map();
   private lastAlertAtByKey: Map<string, number> = new Map();
   private alertTriggerHistory: Map<string, number[]> = new Map();
   private static readonly DEFAULT_CONFIG: AlertConfig = {
@@ -84,6 +89,8 @@ class AlertManager {
     dedupWindowSeconds: 300,
     flapSuppressionWindowSeconds: 1800,
     flapMaxTriggers: 3,
+    invalidPayloadMaxPerWindow: 5,
+    invalidPayloadWindowSeconds: 900,
   };
 
   constructor(config: Partial<AlertConfig> = {}) {
@@ -195,6 +202,41 @@ class AlertManager {
 
       this.slaBreachTimestamps.set(key, []);
     }
+  }
+
+  /**
+   * Issue #584 — records a provider schema violation (response failed
+   * validation). A provider changing its payload shape is the one failure an
+   * operator must see early, so a sustained rate pages instead of degrading
+   * quietly. Returns whether the alert fired, for the caller's metrics.
+   */
+  async checkInvalidPayload(source: string, asset: string, _issues: string): Promise<boolean> {
+    const now = Math.floor(Date.now() / 1000);
+    const key = `${source}:${asset}`;
+    const windowSeconds = this.config.invalidPayloadWindowSeconds ?? 900;
+    const timestamps = this.invalidPayloadTimestamps.get(key) || [];
+
+    const windowStart = now - windowSeconds;
+    const recent = timestamps.filter((t) => t >= windowStart);
+    recent.push(now);
+    this.invalidPayloadTimestamps.set(key, recent);
+
+    if (recent.length < (this.config.invalidPayloadMaxPerWindow ?? 5)) {
+      return false;
+    }
+
+    const fired = await this.emitAlert({
+      timestamp: now,
+      asset: asset.toUpperCase(),
+      type: 'invalid_payload',
+      message: `Provider schema violation for ${source}/${asset}: ${recent.length} invalid payloads in ${windowSeconds}s. Runbook: docs/runbooks/oracle-source-down.md`,
+      source,
+    });
+
+    // Reset the window after firing so a constant violation rate does not
+    // hot-loop the alert; the dedup window already suppresses repeats.
+    this.invalidPayloadTimestamps.set(key, []);
+    return fired;
   }
 
   /**

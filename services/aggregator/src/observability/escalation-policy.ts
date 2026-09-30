@@ -1,4 +1,4 @@
-export type AlertType = 'deviation' | 'stale' | 'source_down' | 'sla_breach' | 'region_quarantine';
+export type AlertType = 'deviation' | 'stale' | 'source_down' | 'sla_breach' | 'invalid_payload';
 
 export type EscalationSeverity = 'critical' | 'warning' | 'info';
 export type EscalationChannel = 'pagerduty' | 'opsgenie' | 'slack';
@@ -21,18 +21,14 @@ export interface EscalationRoute {
 export function resolveEscalationRoute(input: EscalationPolicyInput): EscalationRoute {
   const message = input.message.toLowerCase();
 
-  if (input.type === 'region_quarantine') {
-    return {
-      severity: 'critical',
-      primaryChannel: 'pagerduty',
-      primaryTarget: 'primary-oncall',
-      secondaryTarget: 'engineering-manager',
-      ackWindowMinutes: 15,
-      runbook: 'docs/multi-region.md',
-    };
-  }
-
-  if (input.type === 'source_down' || input.type === 'sla_breach' || message.includes('all sources down') || message.includes('critical')) {
+  if (
+    input.type === 'source_down' ||
+    input.type === 'sla_breach' ||
+    input.type === 'invalid_payload' ||
+    message.includes('all sources down') ||
+    message.includes('critical') ||
+    message.includes('schema violation')
+  ) {
     return {
       severity: 'critical',
       primaryChannel: 'pagerduty',

@@ -11,8 +11,10 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@stellar-oracle/ssrf-guard": "*",
     "@stellar-oracle/types": "*",
     "@stellar-oracle/vault-client": "*",
+    "@stellar-oracle/ws-guard": "*",
     "@stellar/stellar-sdk": "^12.1.0",
     "axios": "^1.7.2",
     "bignumber.js": "^9.1.2",
@@ -22,7 +24,7 @@
     "prom-client": "^15.1.3",
     "winston": "^3.13.1",
     "ws": "^8.17.1",
-    "zod": "^3.25.76"
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

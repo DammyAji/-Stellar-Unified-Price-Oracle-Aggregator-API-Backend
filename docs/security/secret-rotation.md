@@ -11,7 +11,7 @@ without making changes):
 | Category | Command | Covers |
 |---|---|---|
 | Encryption key | `scripts/rotate-secrets.sh encryption-key` | `ENCRYPTION_KEY` |
-| API keys | `scripts/rotate-secrets.sh api-keys` | Admin/API keys via `/admin/keys/:hash/rotate` |
+| API keys | `scripts/rotate-secrets.sh api-keys` | Admin/API keys via `POST /admin/keys/:hash/rotate`, written through to the key store before the response returns |
 | WS secrets | `scripts/rotate-secrets.sh ws-secrets` | WS HMAC + CSRF secrets |
 | DB credentials | `scripts/rotate-secrets.sh db-credentials` | Database username/password |
 | Signer key | `scripts/rotate-secrets.sh signer-key` | Soroban contract signer keypair |
@@ -20,7 +20,33 @@ without making changes):
 Each category rotates without downtime because the previous credential stays
 valid until the new one is confirmed in place (e.g. `ENCRYPTION_KEY_PREVIOUS`
 keeps decrypting old values; the old signer key is only revoked after the new
-one is authorized on-chain).
+one is authorized on-chain). For API keys the opposite is intentional: the old
+key is invalidated the moment the rotation is persisted, and the new key is
+returned exactly once in the rotation response.
+
+## API key persistence and restart semantics
+
+Every admin and self-service key mutation — create, rotate, tier change, rate
+limit change, revoke, reactivate, delete — is written through to the key
+store (Vault KV at `secret/data/api/keys`) before the HTTP response is
+returned. If the store write fails, the request fails with
+`KEY_STORE_WRITE_FAILED` and the mutation is rolled back from memory, so a
+key never exists in memory without also existing in the store. If the store
+is unavailable at startup, the API falls back to in-memory keys and logs that
+mutations are not persisted.
+
+The stored entry holds the SHA-256 hash of the key material plus its
+metadata (display prefix, tier, role, scopes, rate limit, active flag) —
+never the plaintext. A restored entry validates any presented key whose hash
+matches; the plaintext itself cannot be reconstructed from the store, which
+is why a rotated key's plaintext is shown exactly once in the response.
+
+Replicas re-read the store every 30 seconds, so a rotation or revoke on one
+replica reaches the others within that window and every replica immediately
+after restart (see the rotation-drill test in
+`api/tests/key-store-persistence.test.ts`). At startup the store is compared
+against keys seeded from `API_KEYS`: a same-prefix/different-hash conflict is
+logged and both keys are retained rather than silently preferring one.
 
 ## Quarterly drill
 
@@ -38,7 +64,10 @@ a scheduled rotation:
 
 1. **API/admin key** — `POST /admin/keys/:keyHash/revoke` takes effect
    immediately (see `api/src/governance/admin.ts`); the key manager marks it
-   revoked and every subsequent request with that key is rejected.
+   revoked and every subsequent request with that key is rejected. The revoke
+   is persisted to the key store before the response returns, so it survives
+   a restart and reaches other replicas within their 30-second store
+   refresh.
 2. **Encryption key** — generate a new key, deploy it as `ENCRYPTION_KEY`
    immediately, and do not carry the compromised key forward as
    `ENCRYPTION_KEY_PREVIOUS`; re-encrypt any secrets it protected as a

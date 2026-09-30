@@ -16,12 +16,13 @@ is verified, and *which threats it mitigates*.  All code references are to
 
 | # | Control area | Implementation | Tests |
 |---|---|---|---|
-| 1 | SSRF protection | `services/aggregator/src/infrastructure/ssrf.ts` | `tests/ssrf-private-ip.test.ts`, `tests/ssrf-circuit-breaker.test.ts` |
+| 1 | SSRF protection | `packages/ssrf-guard` (shared policy), `services/aggregator/src/infrastructure/ssrf.ts` (oracle egress wiring) | `tests/ssrf-private-ip.test.ts`, `tests/ssrf-circuit-breaker.test.ts` |
 | 2 | Encryption at rest | `api/src/governance/crypto.ts`, aggregator crypto util, `scripts/encrypt-secret.ts`, `packages/vault-client` | `tests/encryption-at-rest.test.ts`, `tests/history-encryption.test.ts` |
 | 3 | API authentication | `api/src/governance/auth.ts`, `api/src/governance/api-key-manager.ts`, `api/src/governance/rbac.ts` | `api/tests/*` (auth, api-key, rate-limit suites) |
 | 4 | WebSocket signing & upgrade protection | `api/src/governance/ws-signing.ts`, `api/src/infrastructure/csrf.ts`, `api/src/infrastructure/upgrade-guard.ts`, `api/src/infrastructure/server.ts` | WS auth/CSRF/signing suites |
 | 5 | Input sanitization | `api/src/governance/sanitization.ts` | sanitization suites |
 | 6 | Secrets management | `scripts/encrypt-secret.ts`, `scripts/rotate-secrets.sh`, `api/src/infrastructure/config.ts` (`decryptSecret`), `packages/vault-client` | `tests/encryption-at-rest.test.ts`, `docs/security/secret-rotation.md` |
+| 7 | HTTPS redirect & proxy trust | `api/src/infrastructure/https.ts`, `api/src/platform/trusted-proxy.ts` | `api/tests/middleware/https-redirect.test.ts` |
 
 ```
                           ┌─────────────────────────────┐
@@ -46,7 +47,9 @@ is verified, and *which threats it mitigates*.  All code references are to
 
 ## 1. SSRF protection
 
-**Where:** `services/aggregator/src/infrastructure/ssrf.ts`, wired into
+**Where:** `packages/ssrf-guard` holds the policy, the CIDR blocklist and the
+secure DNS lookup; `services/aggregator/src/infrastructure/ssrf.ts` binds that
+policy to this service's config and logger and wires it into
 `src/infrastructure/http-client.ts` (all outbound oracle-source requests).
 
 The guard, applied before and during every outbound request, enforces:
@@ -160,13 +163,32 @@ The WebSocket endpoint (`PriceWebSocketServer`) enforces, in order:
    - `nonce` recorded to **reject replays** (a used nonce is refused);
    - **constant-time** signature comparison (`timingSafeEqual`).
 4. **Per-IP upgrade rate limiting & origin checks** — `WsUpgradeGuard`
-   buckets connection attempts per client IP and rejects excessive
-   handshakes; every rejected attempt is logged with the client IP.
+   (API) and `WsConnectionGuard` (aggregator) share one implementation
+   (`packages/ws-guard`, issue #586) so their policies cannot diverge:
+   - **Trusted-proxy-aware identity** — `X-Forwarded-For`/`Forwarded` are
+     honoured only when the direct socket peer is inside a configured
+     `WS_TRUSTED_PROXY_CIDRS` range; the client is the right-most untrusted
+     hop. From untrusted peers these headers are ignored entirely, so header
+     spoofing cannot mint fresh rate-limit buckets or forge abuse
+     attribution.
+   - **Fail-closed origins** — an empty `WS_ALLOWED_ORIGINS` rejects browser
+     connections in production unless `WS_ALLOW_ALL_ORIGINS=true` is set
+     explicitly; omitting the Origin header is not a bypass.
+   - **Rejection accounting** — every rejected upgrade increments
+     `ws_upgrade_rejections_total{reason}` (API:
+     `ws_api_upgrade_rejections_total`) and logs the same resolved identity
+     that rate limiting used.
+
+   **Threat-model note:** origin enforcement restrains browsers only. A
+   non-browser client can omit or forge the Origin header, so it must never
+   be treated as authentication — hence the API key, CSRF token and HMAC
+   signature layers above.
 
 **Threats mitigated:** cross-site WebSocket hijacking (CSRF tokens), replay
 of captured upgrade requests (nonce + TTL), unauthorized access to the price
-stream (API key), handshake flooding (per-IP rate limits), and forged
-upgrade signatures (HMAC + timing-safe compare).
+stream (API key), handshake flooding (per-IP rate limits), forged
+upgrade signatures (HMAC + timing-safe compare), and rate-limit bypass via
+spoofed forwarded headers (trusted-proxy identity, issue #586).
 
 ## 5. Input sanitization
 
@@ -214,11 +236,36 @@ characters.
 long-lived-key compromise, DB/dump leaks (see §2), and unrotated credentials
 after an incident.
 
+## 7. CORS allowlist
+
+**Where:** `api/src/governance/cors-manager.ts`, admin routes in
+`api/src/governance/admin.ts`, wired in `api/src/index.ts`.
+
+- **Fail closed:** an empty allowlist denies every cross-origin request.
+  Development-only `CORS_ALLOW_ANY=true` opts in to reflecting every origin
+  **with credentials disabled**.
+- **Patterns:** exact `http(s)` origins, `*.example.com` (apex plus
+  any-depth subdomains), or the literal `null`. The bare `*` cannot be
+  stored because responses are sent with `credentials: true`.
+- **Shared store:** the allowlist lives in Vault at
+  `secret/data/cors/origins`, so all replicas converge (30 s refresh) and
+  changes survive restarts; `/tmp/cors-origins.json` is only a local cache.
+  Changes go through `POST`/`DELETE /admin/cors/origins` (admin role), are
+  rolled back if the shared-store write fails, are audited
+  (`cors.allowlist.change`, with before/after state), and emit a
+  `cors-allowlist-changed` domain event.
+
+**Threats mitigated:** cross-origin credential theft against an
+unconfigured deployment, split-brain allowlists between replicas, silent
+reversion of allowlist changes during rollouts, and wildcard origins
+combined with credentialed responses.
+
 ## Consolidated threat model & mitigations
 
 | Threat | Affected control | Mitigation (implemented) | Verification |
 |---|---|---|---|
 | SSRF — internal metadata/service access via oracle-source URLs | §1 | Protocol allowlist, host allowlist, private-IP CIDR block, DNS-rebinding revalidation, circuit breaker | ssrf-private-ip / ssrf-circuit-breaker tests |
+| SSRF — internal metadata/service access via a registered webhook URL | §7 | Static validation at registration *and* delivery, HTTPS required, exact-host + per-tenant allowlist, connect-time private-IP refusal, redirects never followed, normalized failure surfaces | ssrf-guard / webhook-ssrf tests |
 | Data-at-rest theft (DB/backups/history) | §2 | AES-256-GCM `enc:v1:` payloads, per-key tagging, rotation with previous-key grace | encryption-at-rest / history-encryption tests |
 | Unauthenticated/unauthorized API access | §3 | Bearer/X-API-Key auth, SHA-256 hashed keys, RBAC roles, tiered rate limits | API auth + rate-limit suites |
 | Key exfiltration | §2, §3, §6 | Plaintext never stored; Vault-backed keys; startup decryption | encryption-at-rest, api-key tests |
@@ -227,6 +274,7 @@ after an incident.
 | WebSocket request replay | §4 | `ts` ±30 s TTL + nonce dedup + timing-safe HMAC verify | WS signing tests |
 | WebSocket handshake flood | §4 | Per-IP upgrade buckets + connection caps | upgrade-guard tests |
 | Prototype pollution / XSS / log injection | §5 | Recursive sanitization: dangerous keys stripped, markup + control chars removed | sanitization suites |
+| Open redirect / plaintext downgrade via `Host` or `X-Forwarded-Proto` | §7 | Scheme from TLS socket or trusted proxy only; redirect to `PUBLIC_BASE_URL`; unexpected `Host` → 421; HSTS only on HTTPS | `https-redirect.test.ts` |
 
 ## Review cadence
 

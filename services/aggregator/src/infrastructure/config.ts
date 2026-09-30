@@ -65,10 +65,52 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       quarantineRecoverPercent: parsed.REGION_QUARANTINE_RECOVER_PERCENT,
       maxReplicationLagMs: parsed.REGION_MAX_REPLICATION_LAG_MS,
     },
+  },
 
-    kafka: {
-      brokers: parsed.KAFKA_BROKERS,
-      sslEnabled: parsed.KAFKA_SSL_ENABLED,
+  assets: (process.env.WATCHED_ASSETS || 'XLM,USDC,BTC,ETH,USDT').split(','),
+
+  // Issue #579 — graceful shutdown. The drain deadline must stay smaller than
+  // the deployment's terminationGracePeriodSeconds (60s in k8s/*); see
+  // docs/PRODUCTION_DEPLOYMENT.md §10 for the arithmetic.
+  shutdown: {
+    drainDeadlineMs: parseInt(process.env.SHUTDOWN_DRAIN_DEADLINE_MS || '25000', 10),
+    forceExitMs: parseInt(process.env.SHUTDOWN_FORCE_EXIT_MS || '35000', 10),
+  },
+
+  logLevel: process.env.LOG_LEVEL || 'info',
+
+  region: {
+    id: process.env.REGION_ID || process.env.AWS_REGION || 'local',
+    activeActive: process.env.ACTIVE_ACTIVE_REGIONS_ENABLED === 'true',
+    peers: commaList(process.env.REGION_PEERS),
+    replicationTopic: process.env.REGION_REPLICATION_TOPIC || 'stellar-oracle-prices',
+    driftAlertPercent: parseFloat(process.env.REGION_DRIFT_ALERT_PERCENT || '0.1'),
+    quarantineEnabled: process.env.REGION_QUARANTINE_ENABLED === 'true',
+    quarantineRecoverPercent: parseFloat(process.env.REGION_QUARANTINE_RECOVER_PERCENT || '0.05'),
+    maxReplicationLagMs: parseInt(process.env.REGION_MAX_REPLICATION_LAG_MS || '5000', 10),
+  },
+
+  database: {
+    url: decryptSecret(process.env.DATABASE_URL || ''),
+    // TimescaleDB: convert the price_history table into a hypertable when available.
+    useTimescale: process.env.USE_TIMESCALEDB !== 'false',
+    // Chunk interval in seconds for the integer `timestamp` time dimension (default 7 days).
+    chunkIntervalSeconds: parseInt(process.env.TIMESCALE_CHUNK_INTERVAL_SECONDS || '604800', 10),
+    retentionDays: parseInt(process.env.HISTORY_RETENTION_DAYS || '0', 10),
+  },
+
+  // Caps applied to file-based history on every append (issue #214), so the
+  // JSON files under data/ cannot grow without bound. Set either to 0 to disable.
+  history: {
+    maxEntries: parseInt(process.env.HISTORY_MAX_ENTRIES || '10000', 10),
+    retentionSeconds: parseInt(process.env.HISTORY_RETENTION_SECONDS || '604800', 10),
+    // File-based archival to cold storage (issue #43).
+    archival: {
+      enabled: process.env.FILE_ARCHIVAL_ENABLED === 'true',
+      archiveAfterDays: parseInt(process.env.FILE_ARCHIVE_AFTER_DAYS || '90', 10),
+      retentionDays: parseInt(process.env.FILE_RETENTION_DAYS || '0', 10),
+      coldStorageDir: process.env.FILE_COLD_STORAGE_DIR || './data/archive',
+      intervalMs: parseInt(process.env.FILE_ARCHIVAL_INTERVAL_MS || '86400000', 10),
     },
 
     database: {
@@ -77,17 +119,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       chunkIntervalSeconds: parsed.TIMESCALE_CHUNK_INTERVAL_SECONDS,
       retentionDays: parsed.HISTORY_RETENTION_DAYS,
     },
-
-    history: {
-      maxEntries: parsed.HISTORY_MAX_ENTRIES,
-      retentionSeconds: parsed.HISTORY_RETENTION_SECONDS,
-      archival: {
-        enabled: parsed.FILE_ARCHIVAL_ENABLED,
-        archiveAfterDays: parsed.FILE_ARCHIVE_AFTER_DAYS,
-        retentionDays: parsed.FILE_RETENTION_DAYS,
-        coldStorageDir: parsed.FILE_COLD_STORAGE_DIR,
-        intervalMs: parsed.FILE_ARCHIVAL_INTERVAL_MS,
-      },
+    // WebSocket upgrade hardening (issue #40, #586).
+    websocket: {
+      allowedOrigins: commaList(process.env.WS_ALLOWED_ORIGINS),
+      requireOrigin: process.env.WS_REQUIRE_ORIGIN !== 'false',
+      maxConnectionsPerWindow: parseInt(process.env.WS_RATE_LIMIT_MAX || '20', 10),
+      rateLimitWindowMs: parseInt(process.env.WS_RATE_LIMIT_WINDOW_MS || '60000', 10),
     },
 
     security: {
