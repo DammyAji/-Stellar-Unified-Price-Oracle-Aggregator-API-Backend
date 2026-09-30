@@ -29,6 +29,7 @@ import AlertManager from './observability/alert-manager';
 import { sourceCircuitBreaker } from './price-aggregation/source-circuit-breaker';
 import { eventBus } from './domain-events';
 import { decryptSecret } from './infrastructure/crypto';
+import { flushDailyCounts } from './infrastructure/cost-model';
 import { getVaultClient } from '@stellar-oracle/vault-client';
 import {
   enforceStartupCardinalityBudget,
@@ -442,6 +443,7 @@ async function main(): Promise<void> {
 
   fileArchival.start();
 
+<<<<<<< HEAD
   // Issue #579 — one idempotent handler covers SIGTERM and SIGINT.
   const shutdownHooks: ShutdownHooks = {
     flipReadiness: () => {
@@ -472,6 +474,8 @@ async function main(): Promise<void> {
       await publisher.shutdown();
     },
     closeServers: async () => {
+      // #583 — flush persisted daily call counters so budgets survive restarts.
+      flushDailyCounts();
       wss.stop();
       healthServer.stop();
     },
