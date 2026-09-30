@@ -43,6 +43,7 @@ import governanceRoutes from './governance/proposal-routes';
 import { uptimeTracker } from './observability/uptime-tracker';
 import { getVaultClient } from '@stellar-oracle/vault-client';
 import { apiKeyManager } from './governance/api-key-manager';
+import { startAuditRetentionScheduler, stopAuditRetentionScheduler } from './governance/audit-logger';
 import webhooksRoutes from './webhooks/webhooks';
 import graphqlRoutes from './graphql';
 import releaseNotesRoutes from './release-notes/router';
@@ -128,6 +129,8 @@ async function initializeApp(): Promise<void> {
   } else {
     logger.info('DATABASE_URL not configured, using file-based storage');
   }
+
+  startAuditRetentionScheduler();
 }
 
 const cache = new HybridCache<unknown>(logger, {
@@ -252,6 +255,7 @@ async function startServer(): Promise<void> {
 
   const shutdown = () => {
     logger.info('Shutting down API server...');
+    stopAuditRetentionScheduler();
     wss.stop();
     if (archival) archival.stop();
     if (dbHealthMonitor) dbHealthMonitor.stop();
