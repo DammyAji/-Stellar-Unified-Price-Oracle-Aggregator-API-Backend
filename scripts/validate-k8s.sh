@@ -101,6 +101,66 @@ if missing:
 print("  OK: API and aggregator workloads include non-root, read-only root, dropped capabilities, RuntimeDefault seccomp, and writable mounts.")
 PY
 
+echo "==> Checking topology spread and anti-affinity for API and aggregator workloads"
+python3 - <<'PY'
+import pathlib, sys
+try:
+    import yaml
+except ImportError:
+    print("PyYAML not installed; skipping topology spread check")
+    sys.exit(0)
+
+required = {
+    'api-stable': 'api',
+    'api-canary': 'api',
+    'aggregator': 'aggregator',
+}
+
+paths = [
+    pathlib.Path('/tmp/stellar-oracle-staging.yaml'),
+    pathlib.Path('/tmp/stellar-oracle-prod-us-east-1.yaml'),
+    pathlib.Path('/tmp/stellar-oracle-prod-eu-west-1.yaml'),
+]
+missing = []
+for path in paths:
+    docs = list(yaml.safe_load_all(path.read_text()))
+    by_name = {doc.get('metadata', {}).get('name'): doc for doc in docs if isinstance(doc, dict) and doc.get('kind') == 'Deployment'}
+    for name, app_label in required.items():
+        doc = by_name.get(name)
+        if doc is None:
+            continue
+        pod_spec = doc.get('spec', {}).get('template', {}).get('spec', {})
+        prefs = pod_spec.get('affinity', {}).get('podAntiAffinity', {}).get('preferredDuringSchedulingIgnoredDuringExecution', [])
+        if not any(
+            term.get('podAffinityTerm', {}).get('topologyKey') == 'kubernetes.io/hostname'
+            and term.get('podAffinityTerm', {}).get('labelSelector', {}).get('matchLabels', {}).get('app') == app_label
+            for term in prefs
+        ):
+            missing.append(f"{name}: preferred pod anti-affinity missing hostname rule for {app_label}")
+        spread = pod_spec.get('topologySpreadConstraints', [])
+        if not any(
+            c.get('topologyKey') == 'kubernetes.io/hostname'
+            and c.get('whenUnsatisfiable') == 'ScheduleAnyway'
+            and c.get('labelSelector', {}).get('matchLabels', {}).get('app') == app_label
+            for c in spread
+        ):
+            missing.append(f"{name}: hostname topology spread missing or not ScheduleAnyway")
+        if not any(
+            c.get('topologyKey') == 'topology.kubernetes.io/zone'
+            and c.get('whenUnsatisfiable') == 'ScheduleAnyway'
+            and c.get('labelSelector', {}).get('matchLabels', {}).get('app') == app_label
+            for c in spread
+        ):
+            missing.append(f"{name}: zone topology spread missing or not ScheduleAnyway")
+
+if missing:
+    for item in missing:
+        print(f"  FAIL: {item}")
+    raise SystemExit(1)
+
+print("  OK: API and aggregator workloads include hostname/zone spread and preferred anti-affinity.")
+PY
+
 if command -v kubeconform >/dev/null 2>&1; then
   echo "==> Running kubeconform"
   SCHEMA_FLAGS=(
