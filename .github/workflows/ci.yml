@@ -391,42 +391,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build services
-        run: npm run build:backend
-
-      - name: Run integration tests against a live stack
+      - name: Run integration tests (build + stack + tests + teardown)
+        # SSRF guard blocks loopback by default; the stub runs on loopback.
+        # WS clients in tests connect without an Origin header.
+        # SKIP_BUILD is not set so the script builds first, matching the local
+        # developer experience exactly (same entry point, same behaviour).
         env:
-          # The stub is reached over loopback, which the SSRF guard blocks by
-          # default, and the test clients connect without an Origin header.
           SSRF_ALLOW_PRIVATE_IPS: 'true'
           WS_REQUIRE_ORIGIN: 'false'
-        run: |
-          set -euo pipefail
-
-          nohup node scripts/stub-oracle-server.mjs > /tmp/stub-oracle.log 2>&1 &
-
-          # Each service resolves its history directory relative to its own dist
-          # folder, so they only agree when api/data points at the aggregator's.
-          rm -rf api/data
-          ln -s "$PWD/services/aggregator/data" api/data
-
-          (
-            cd services/aggregator
-            nohup env \
-              PORT=4000 \
-              POLLING_INTERVAL_MS=1000 \
-              node dist/index.js > /tmp/aggregator.log 2>&1 &
-          )
-
-          nohup env \
-            PORT=3000 \
-            AGGREGATOR_URL=http://localhost:4000 \
-            node api/dist/index.js > /tmp/api.log 2>&1 &
-
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:3000/api/v1/health && break
-            echo "Waiting for stack... ($i/30)"
-            sleep 2
-          done
-
-          node scripts/integration-test.mjs
+          TEST_API_KEY: 'integration-ci-key'
+        run: npm run test:integration
